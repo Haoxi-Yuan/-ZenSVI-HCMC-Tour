@@ -478,3 +478,26 @@ Two interactive map features for the LandingPage:
 |--------|------|-------------|
 | GET | `/api/insights/story/shots` | 7 shots with LLM narrations |
 | POST | `/api/insights/story/warm-cache` | Pre-generate all story narrations |
+
+---
+
+## Phase 3: Scene Evidence for LLM Insights
+
+### Goal
+Ground LLM insights in actual street-level visual observations. Each street gets 6 key sampling
+points (best_2 by strongest dim + worst_2 by weakest dim + delta_2 by walkability change).
+The LLM must cite evidence IDs (E1-E6) in its output. Frontend shows thumbnails with
+hover descriptions.
+
+### Files
+
+| File | Action |
+|------|--------|
+| `backend/services/scene_evidence.py` | NEW — point selection, rule-based tags, descriptions |
+| `backend/services/llm_service.py` | MODIFY — add scene_evidence to payload + response |
+| `backend/services/prompts.py` | MODIFY — v3 prompt with evidence citation rules |
+| `backend/services/story_service.py` | MODIFY — 2 evidence points per street-based shot |
+| `frontend/src/components/InsightPanel.jsx` | MODIFY — evidence thumbnail strip + hover |
+| `frontend/src/components/StoryNarration.jsx` | MODIFY — scene_evidence thumbnails |
+| `frontend/src/pages/TourSummary.jsx` | MODIFY — pass sceneEvidence prop |
+| `frontend/src/styles/globals.css` | MODIFY — .evidence-strip/thumb/label/tooltip CSS |

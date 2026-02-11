@@ -21,20 +21,47 @@ export default function CompareMode({ mainMap, containerRef, onExit }) {
   const [topMapReady, setTopMapReady] = useState(false)
   const draggingRef = useRef(false)
 
-  // Initialize slider position
+  // Initialize/recompute slider position from container width
   useEffect(() => {
-    if (!containerRef.current) return
-    setSliderX(containerRef.current.offsetWidth / 2)
+    const updateSlider = () => {
+      const width = containerRef.current?.offsetWidth
+      if (!width || width <= 0) return
+      setSliderX(prev => {
+        if (prev == null) return width / 2
+        return Math.max(40, Math.min(width - 40, prev))
+      })
+    }
+
+    updateSlider()
+    window.addEventListener('resize', updateSlider)
+    return () => window.removeEventListener('resize', updateSlider)
   }, [containerRef])
 
   // Save original mainMap street color and set right dimension
   const originalColorRef = useRef(null)
+  const capturedOriginalColorRef = useRef(false)
   useEffect(() => {
     if (!mainMap || !mainMap.getLayer('streets-line')) return
-    originalColorRef.current = mainMap.getPaintProperty('streets-line', 'line-color')
+    if (!capturedOriginalColorRef.current) {
+      originalColorRef.current = mainMap.getPaintProperty('streets-line', 'line-color')
+      capturedOriginalColorRef.current = true
+    }
+  }, [mainMap])
+
+  useEffect(() => {
+    if (!mainMap || !mainMap.getLayer('streets-line')) return
     const expr = buildColorExpression(rightDim)
     if (expr) mainMap.setPaintProperty('streets-line', 'line-color', expr)
   }, [mainMap, rightDim])
+
+  // Safety restore if component unmounts without explicit exit handler.
+  useEffect(() => {
+    return () => {
+      if (mainMap && capturedOriginalColorRef.current && mainMap.getLayer('streets-line')) {
+        mainMap.setPaintProperty('streets-line', 'line-color', originalColorRef.current)
+      }
+    }
+  }, [mainMap])
 
   // Hide hex-fill during compare
   useEffect(() => {
@@ -139,11 +166,16 @@ export default function CompareMode({ mainMap, containerRef, onExit }) {
     if (expr) topMap.setPaintProperty('streets-line-compare', 'line-color', expr)
   }, [leftDim, topMapReady])
 
+  const effectiveSliderX = sliderX ?? (containerRef.current?.offsetWidth
+    ? containerRef.current.offsetWidth / 2
+    : 200)
+
   // Apply clip-path to top map container
   useEffect(() => {
-    if (!topContainerRef.current || sliderX === null) return
-    topContainerRef.current.style.clipPath = `inset(0 ${containerRef.current.offsetWidth - sliderX}px 0 0)`
-  }, [sliderX, containerRef])
+    const width = containerRef.current?.offsetWidth
+    if (!topContainerRef.current || !width) return
+    topContainerRef.current.style.clipPath = `inset(0 ${width - effectiveSliderX}px 0 0)`
+  }, [effectiveSliderX, containerRef])
 
   // Divider drag handling
   const handleMouseDown = useCallback((e) => {
@@ -175,14 +207,12 @@ export default function CompareMode({ mainMap, containerRef, onExit }) {
     onExit()
   }, [mainMap, onExit])
 
-  if (sliderX === null) return null
-
   return (
     <>
       {/* Divider bar */}
       <div
         className="compare-divider"
-        style={{ left: `${sliderX}px` }}
+        style={{ left: `${effectiveSliderX}px` }}
         onMouseDown={handleMouseDown}
       />
 

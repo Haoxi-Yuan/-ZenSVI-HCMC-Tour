@@ -1,14 +1,16 @@
 """Story service: selects 7 narrative shots and generates LLM narrations."""
 
+import hashlib
 import json
 import traceback
 
 from backend import data_store
-from backend.config import LLM_PROVIDER
+from backend.config import LLM_PROVIDER, LLM_MODEL
 from backend.services.llm_providers import get_provider
 from backend.services.cache_service import cache_get, cache_set
-from backend.services.prompts import build_story_prompt
+from backend.services.prompts import build_story_prompt, STORY_PROMPT_VERSION
 from backend.services.analytics import get_street_rank
+from backend.services.scene_evidence import get_scene_evidence
 
 
 def _is_valid_name(name: str) -> bool:
@@ -222,26 +224,38 @@ async def generate_story_narrations(shots: list[dict]) -> list[dict]:
     results = []
 
     for shot in shots:
-        cache_key = f"story:shot:{shot['id']}"
-        cached = cache_get(cache_key)
-
-        if cached:
-            shot_with_narration = {**shot, "narration": json.loads(cached)["narration"]}
-            # Remove internal data_context from response
-            shot_with_narration.pop("data_context", None)
-            results.append(shot_with_narration)
-            continue
-
-        # Get rank info for streets with names
+        # Get rank info and scene evidence for streets with names
         rank_info = None
+        shot_evidence = None
         if shot["street_name"]:
             rank_info = get_street_rank(shot["street_name"])
+            # Get best + worst evidence points for street-based shots
+            full_evidence = get_scene_evidence(shot["street_name"])
+            if full_evidence:
+                # Take first best and first worst (up to 2 points)
+                best = [e for e in full_evidence if e["label"] == "best"][:1]
+                worst = [e for e in full_evidence if e["label"] == "worst"][:1]
+                shot_evidence = best + worst
+                if not shot_evidence:
+                    shot_evidence = full_evidence[:2]
 
         system_prompt, user_prompt = build_story_prompt(
             shot=shot,
             city_stats=city,
             rank_info=rank_info,
+            scene_evidence=shot_evidence,
         )
+        prompt_hash = hashlib.sha256(f"{system_prompt}\n{user_prompt}".encode("utf-8")).hexdigest()[:16]
+        cache_key = f"story:shot:{shot['id']}:{STORY_PROMPT_VERSION}:{LLM_MODEL}:{prompt_hash}"
+        cached = cache_get(cache_key)
+
+        if cached:
+            shot_with_narration = {**shot, "narration": json.loads(cached)["narration"]}
+            shot_with_narration.pop("data_context", None)
+            if shot_evidence:
+                shot_with_narration["scene_evidence"] = shot_evidence
+            results.append(shot_with_narration)
+            continue
 
         try:
             provider = get_provider(LLM_PROVIDER)
@@ -258,6 +272,8 @@ async def generate_story_narrations(shots: list[dict]) -> list[dict]:
 
         shot_with_narration = {**shot, "narration": narration}
         shot_with_narration.pop("data_context", None)
+        if shot_evidence:
+            shot_with_narration["scene_evidence"] = shot_evidence
         results.append(shot_with_narration)
 
     return results

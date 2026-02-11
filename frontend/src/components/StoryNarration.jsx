@@ -1,13 +1,55 @@
+import { useState } from 'react'
+
+function StoryEvidence({ ev }) {
+  const [hovered, setHovered] = useState(false)
+  return (
+    <div
+      className={`evidence-thumb ${ev.label === 'best' ? 'best' : ev.label === 'worst' ? 'worst' : 'transition'}`}
+      style={{ width: '80px', flexShrink: 0 }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      {ev.thumbnail_url && (
+        <img src={ev.thumbnail_url} alt={`Evidence ${ev.id}`} loading="lazy" />
+      )}
+      <span className="evidence-label">{ev.id}</span>
+      {hovered && (
+        <div className="evidence-tooltip" style={{ width: '220px', bottom: 'calc(100% + 6px)' }}>
+          <div style={{ fontSize: '10px', color: 'var(--accent-green)', fontWeight: 600, marginBottom: '4px' }}>
+            {ev.id} / {ev.label}
+          </div>
+          <div style={{ fontSize: '11px', color: 'var(--text-secondary)', lineHeight: 1.5 }}>
+            {ev.description}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
 /**
  * StoryNarration — Bottom card showing story progress, narration text, and controls.
  */
-export default function StoryNarration({ shots, currentIndex, phase, onPause, onResume, onSkip, onExit }) {
+export default function StoryNarration({
+  shots,
+  currentIndex,
+  phase,
+  shotImages = [],
+  imageLoading = false,
+  canEnterTour = false,
+  onEnterTour,
+  onPause,
+  onResume,
+  onSkip,
+  onExit,
+}) {
   if (!shots || shots.length === 0) return null
 
   const current = shots[currentIndex] || shots[0]
   const isPlaying = phase === 'PLAYING'
   const isPaused = phase === 'PAUSED'
   const isEnded = phase === 'ENDED'
+  const evidence = current.scene_evidence || []
 
   return (
     <div className="story-narration">
@@ -36,6 +78,49 @@ export default function StoryNarration({ shots, currentIndex, phase, onPause, on
         {current.narration || 'Loading narration...'}
       </div>
 
+      {current.street_name && (
+        <div style={{ marginTop: '10px' }}>
+          <div style={{
+            fontSize: '10px',
+            color: 'var(--text-muted)',
+            letterSpacing: '0.06em',
+            textTransform: 'uppercase',
+            marginBottom: '6px',
+          }}>
+            Street Evidence / Map marker shows this street position
+          </div>
+
+          {evidence.length > 0 ? (
+            <div style={{ display: 'flex', gap: '6px' }}>
+              {evidence.map(ev => (
+                <StoryEvidence key={ev.id} ev={ev} />
+              ))}
+            </div>
+          ) : imageLoading ? (
+            <div style={{ fontSize: '11px', color: 'var(--text-muted)', fontStyle: 'italic' }}>
+              Loading street-view snapshots...
+            </div>
+          ) : (
+            <div style={{ display: 'flex', gap: '6px' }}>
+              {shotImages.map((url, idx) => (
+                <img
+                  key={`${url}-${idx}`}
+                  src={url}
+                  alt={`Story shot reference ${idx + 1}`}
+                  style={{
+                    width: '92px',
+                    height: '52px',
+                    objectFit: 'cover',
+                    border: '1px solid rgba(245, 240, 232, 0.15)',
+                    opacity: 0.9,
+                  }}
+                />
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Controls */}
       <div className="story-controls">
         {isPlaying && (
@@ -59,6 +144,11 @@ export default function StoryNarration({ shots, currentIndex, phase, onPause, on
         {isEnded && (
           <button className="story-btn" onClick={() => { /* could restart */ onExit() }}>
             Replay or Explore
+          </button>
+        )}
+        {canEnterTour && (
+          <button className="story-btn" onClick={onEnterTour}>
+            Enter Tour
           </button>
         )}
         <button className="story-btn exit" onClick={onExit}>

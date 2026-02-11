@@ -308,6 +308,7 @@ export default function TourSummary() {
               cached={insightData?.cached}
               loading={insightLoading}
               error={insightError}
+              sceneEvidence={insightData?.scene_evidence}
             />
           </div>
         )}

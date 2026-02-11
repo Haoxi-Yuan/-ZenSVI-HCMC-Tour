@@ -9,6 +9,7 @@ from backend.services.llm_providers import get_provider
 from backend.services.cache_service import cache_get, cache_set
 from backend.services.prompts import build_insight_prompt, PROMPT_VERSION
 from backend.services.analytics import get_street_rank, get_similar_streets, get_street_drivers
+from backend.services.scene_evidence import get_scene_evidence
 
 
 def _build_structured_input(
@@ -16,6 +17,7 @@ def _build_structured_input(
     rank_info: dict,
     similar: list,
     drivers: dict,
+    scene_evidence: list | None = None,
 ) -> dict:
     dims = rank_info.get("dimensions", {})
     total = rank_info.get("total_streets", 0)
@@ -98,7 +100,20 @@ def _build_structured_input(
             "deltas": s.get("deltas", {}),
         })
 
-    return {
+    # Strip thumbnail URLs from evidence for LLM (it doesn't need image paths)
+    llm_evidence = []
+    for ev in (scene_evidence or []):
+        llm_evidence.append({
+            "id": ev["id"],
+            "label": ev["label"],
+            "segmentation_top": ev["segmentation_top"],
+            "detection": ev["detection"],
+            "perception": ev["perception"],
+            "visual_tags": ev["visual_tags"],
+            "description": ev["description"],
+        })
+
+    result = {
         "street": street_name,
         "overall_judgement": overall_judgement,
         "top_strength": top_strength,
@@ -107,6 +122,9 @@ def _build_structured_input(
         "similar_streets": similar_compact,
         "drivers_by_dimension": drivers,
     }
+    if llm_evidence:
+        result["scene_evidence"] = llm_evidence
+    return result
 
 
 async def generate_street_insight(street_name: str, refresh: bool = False) -> dict:
@@ -137,11 +155,14 @@ async def generate_street_insight(street_name: str, refresh: bool = False) -> di
                    "accessibility": {"score": 0, "drivers": []},
                    "comfort": {"score": 0, "drivers": []}}
 
+    scene_evidence = get_scene_evidence(street_name)
+
     structured_input = _build_structured_input(
         street_name=street_name,
         rank_info=rank_info,
         similar=similar,
         drivers=drivers,
+        scene_evidence=scene_evidence,
     )
 
     # 2. Build prompt
@@ -157,7 +178,7 @@ async def generate_street_insight(street_name: str, refresh: bool = False) -> di
     if not refresh:
         cached = cache_get(cache_key)
         if cached:
-            return {**json.loads(cached), "cached": True}
+            return {**json.loads(cached), "cached": True, "scene_evidence": scene_evidence}
 
     # 4. Call LLM
     try:
@@ -184,4 +205,4 @@ async def generate_street_insight(street_name: str, refresh: bool = False) -> di
     }
     cache_set(cache_key, json.dumps(result))
 
-    return {**result, "cached": False}
+    return {**result, "cached": False, "scene_evidence": scene_evidence}
