@@ -3,7 +3,11 @@ import { useParams, Link } from 'react-router-dom'
 import RadarChart from '../components/RadarChart'
 import Sparkline from '../components/Sparkline'
 import ScatterPlot from '../components/ScatterPlot'
+import PercentileBar from '../components/PercentileBar'
+import SimilarStreets from '../components/SimilarStreets'
+import InsightPanel from '../components/InsightPanel'
 import { useStreetData, useStreetPoints } from '../hooks/useStreetData'
+import { useStreetRank, useLLMInsight } from '../hooks/useInsights'
 
 const PERCEPTION_DIMS = ['safer', 'livelier', 'wealthier', 'more_beautiful', 'more_boring', 'more_depressing']
 const PERCEPTION_LABELS = ['Safer', 'Livelier', 'Wealthier', 'Beautiful', 'Boring', 'Depressing']
@@ -13,6 +17,8 @@ export default function TourSummary() {
   const decodedName = decodeURIComponent(streetName)
   const { street, loading: streetLoading } = useStreetData(decodedName)
   const { points, loading: pointsLoading } = useStreetPoints(decodedName)
+  const { data: rankData } = useStreetRank(decodedName)
+  const { data: insightData, loading: insightLoading, error: insightError } = useLLMInsight(decodedName)
 
   const loading = streetLoading || pointsLoading
 
@@ -210,7 +216,7 @@ export default function TourSummary() {
           display: 'flex',
           alignItems: 'center',
           gap: '48px',
-          marginBottom: '64px',
+          marginBottom: '48px',
           paddingBottom: '48px',
           borderBottom: '1px solid rgba(245, 240, 232, 0.06)',
         }}>
@@ -258,6 +264,53 @@ export default function TourSummary() {
             ))}
           </div>
         </div>
+
+        {/* City Ranking + AI Insight (NEW) */}
+        {rankData && (
+          <div style={{
+            marginBottom: '64px',
+            paddingBottom: '48px',
+            borderBottom: '1px solid rgba(245, 240, 232, 0.06)',
+          }}>
+            <div className="section-label">City Ranking</div>
+            <h2 style={{
+              fontFamily: "'Playfair Display', serif",
+              fontSize: '28px',
+              fontWeight: 700,
+              marginBottom: '32px',
+            }}>How this street compares to {rankData.total_streets.toLocaleString()} streets</h2>
+
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '1fr 1fr',
+              gap: '16px 48px',
+              marginBottom: '32px',
+            }}>
+              {['walkability', 'safety', 'accessibility', 'comfort'].map(dim => {
+                const d = rankData.dimensions[dim]
+                return (
+                  <PercentileBar
+                    key={dim}
+                    label={dim === 'walkability' ? 'Overall Walkability' : dim.charAt(0).toUpperCase() + dim.slice(1)}
+                    score={d.score}
+                    rank={d.rank}
+                    percentile={d.percentile}
+                    total={rankData.total_streets}
+                    rankLabel={d.label}
+                  />
+                )
+              })}
+            </div>
+
+            <InsightPanel
+              insight={insightData?.insight}
+              model={insightData?.model}
+              cached={insightData?.cached}
+              loading={insightLoading}
+              error={insightError}
+            />
+          </div>
+        )}
 
         {/* Radar Charts Row */}
         <div style={{
@@ -358,6 +411,21 @@ export default function TourSummary() {
                 />
               </div>
             ))}
+          </div>
+        </div>
+
+        {/* Similar Streets (NEW) */}
+        <div style={{ marginBottom: '64px' }}>
+          <div className="section-label">Similar Streets</div>
+          <h2 style={{
+            fontFamily: "'Playfair Display', serif",
+            fontSize: '28px',
+            fontWeight: 700,
+            marginBottom: '32px',
+          }}>Streets with a similar walkability profile</h2>
+
+          <div className="card" style={{ padding: '24px' }}>
+            <SimilarStreets streetName={decodedName} />
           </div>
         </div>
 
