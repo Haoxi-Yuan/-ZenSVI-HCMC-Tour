@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import maplibregl from 'maplibre-gl'
 import Navbar from '../components/Navbar'
@@ -6,6 +6,8 @@ import StreetSearch from '../components/StreetSearch'
 import StreetRanking from '../components/StreetRanking'
 import FeaturedStreets from '../components/FeaturedStreets'
 import LayerSwitcher from '../components/LayerSwitcher'
+import CompareMode from '../components/CompareMode'
+import StoryCamera from '../components/StoryCamera'
 import { useCityStats } from '../hooks/useStreetData'
 
 function Counter({ target, suffix = '', decimals = 0 }) {
@@ -136,9 +138,18 @@ function DataSection() {
 
 function MapSection() {
   const mapContainer = useRef(null)
+  const mapWrapperRef = useRef(null) // wrapper div for CompareMode overlay
   const map = useRef(null)
   const [mapReady, setMapReady] = useState(false)
+  const [compareActive, setCompareActive] = useState(false)
+  const [storyActive, setStoryActive] = useState(false)
+  const modeRef = useRef({ compare: false, story: false }) // avoid stale closures
   const navigate = useNavigate()
+
+  // Keep modeRef in sync
+  useEffect(() => {
+    modeRef.current = { compare: compareActive, story: storyActive }
+  }, [compareActive, storyActive])
 
   useEffect(() => {
     // React 18 StrictMode runs effects twice in dev (mount -> cleanup -> mount).
@@ -226,8 +237,9 @@ function MapSection() {
         },
       }, 'streets-line')
 
-      // Click to enter tour
+      // Click to enter tour (guarded: disabled during compare/story modes)
       map.current.on('click', 'streets-line', (e) => {
+        if (modeRef.current.compare || modeRef.current.story) return
         const name = e.features[0].properties.name
         if (name) {
           navigate(`/tour/${encodeURIComponent(name)}`)
@@ -329,14 +341,49 @@ function MapSection() {
           </div>
         </div>
 
-        {mapReady && <LayerSwitcher map={map.current} />}
+        {mapReady && !compareActive && !storyActive && <LayerSwitcher map={map.current} />}
+
+        {/* Mode toggle buttons */}
+        {mapReady && (
+          <div style={{ display: 'flex', gap: '8px', marginTop: '16px' }}>
+            <button
+              className="mode-toggle-btn"
+              onClick={() => setCompareActive(true)}
+              disabled={storyActive || compareActive}
+            >
+              {compareActive ? 'Comparing...' : 'Compare Dimensions'}
+            </button>
+            <button
+              className="mode-toggle-btn"
+              onClick={() => setStoryActive(true)}
+              disabled={compareActive || storyActive}
+            >
+              {storyActive ? 'Playing...' : 'Story Tour'}
+            </button>
+          </div>
+        )}
       </div>
 
-      <div className="map-container">
+      <div className="map-container" ref={mapWrapperRef}>
         <div ref={mapContainer} style={{ width: '100%', height: '100%' }} />
-        <div className="map-overlay-label">
-          <strong>Walkability Index</strong> / Click a street to explore
-        </div>
+        {!compareActive && !storyActive && (
+          <div className="map-overlay-label">
+            <strong>Walkability Index</strong> / Click a street to explore
+          </div>
+        )}
+        {compareActive && map.current && (
+          <CompareMode
+            mainMap={map.current}
+            containerRef={mapWrapperRef}
+            onExit={() => setCompareActive(false)}
+          />
+        )}
+        {storyActive && map.current && (
+          <StoryCamera
+            map={map.current}
+            onExit={() => setStoryActive(false)}
+          />
+        )}
       </div>
     </section>
   )

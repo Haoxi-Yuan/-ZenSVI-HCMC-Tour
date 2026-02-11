@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
+import { SCORE_COLOR_STOPS } from '../utils/mapConstants'
 
 const WALKABILITY_LAYERS = [
   { id: 'walkability', label: 'Overall Walkability', property: 'walkability' },
@@ -90,12 +91,7 @@ const ENVIRONMENT_LAYERS = [
   },
 ]
 
-const SCORE_COLOR_STOPS = {
-  walkability: [[2, '#E8734A'], [4, '#D4A855'], [5.5, '#3DBB78'], [7, '#2AAF65']],
-  safety: [[2, '#E8734A'], [4, '#D4A855'], [5.5, '#3DBB78'], [7, '#2AAF65']],
-  accessibility: [[2, '#E8734A'], [4, '#D4A855'], [5.5, '#3DBB78'], [7, '#2AAF65']],
-  comfort: [[2, '#E8734A'], [4, '#D4A855'], [5.5, '#3DBB78'], [7, '#2AAF65']],
-}
+// SCORE_COLOR_STOPS imported from ../utils/mapConstants
 
 /**
  * Layer switcher for walkability street colors and hex grid layers.

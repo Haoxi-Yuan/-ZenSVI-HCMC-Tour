@@ -420,3 +420,61 @@ Step 9: End-to-end testing + polish
 | `frontend/src/components/InsightPanel.jsx` | NEW | ~60 |
 | `frontend/src/pages/TourSummary.jsx` | MODIFY | +~80 |
 | **Total** | 21 new, 4 modified | ~1,350 |
+
+---
+---
+
+# Phase 2: Compare Mode + Story Camera
+
+**Status**: IMPLEMENTED
+
+## Overview
+
+Two interactive map features for the LandingPage:
+1. **Compare Mode** (卷帘/swipe) — Draggable vertical divider showing two walkability dimensions side-by-side
+2. **Story Camera** (讲故事镜头) — Guided flyTo narrative with 7 pre-defined shots and LLM narration
+
+## Architecture
+
+### Compare Mode
+- Two overlaid MapLibre instances. Bottom map (mainMap) = right side; top map = left side, clipped via CSS `clip-path`.
+- Bidirectional camera sync (bottom → top) using `map.on('move')` with recursion guard.
+- Dimension selectors for left/right, draggable divider bar.
+- Hex-fill hidden during compare mode. LayerSwitcher hidden.
+
+### Story Camera
+- 7 shots selected from `streets_summary` data:
+  1. City Overview (zoom out)
+  2. Best Walkability (highest walkability score)
+  3. Safest Street (highest safety)
+  4. Most Accessible (highest accessibility)
+  5. Hidden Danger (high safety, low walkability)
+  6. Least Walkable (lowest walkability)
+  7. Call to Action (zoom back out)
+- State machine: LOADING → PLAYING ↔ PAUSED → ENDED
+- `map.flyTo()` with `map.once('moveend')` for sequencing, 2s pause between shots
+- User drag → immediate exit. Hex-fill hidden for performance.
+- LLM narration per shot (1-2 sentences, max 40 words), cached in SQLite.
+
+## Files
+
+| File | Action |
+|------|--------|
+| `frontend/src/utils/mapConstants.js` | NEW — shared SCORE_COLOR_STOPS, buildColorExpression |
+| `frontend/src/components/CompareMode.jsx` | NEW — dual-map overlay with swipe divider |
+| `frontend/src/components/StoryCamera.jsx` | NEW — flyTo state machine + highlight |
+| `frontend/src/components/StoryNarration.jsx` | NEW — bottom narration card with controls |
+| `frontend/src/hooks/useStory.js` | NEW — useStoryShots() hook |
+| `backend/services/story_service.py` | NEW — shot selection + LLM narration generation |
+| `frontend/src/pages/LandingPage.jsx` | MODIFY — toggle buttons, mode guards, render overlays |
+| `frontend/src/components/LayerSwitcher.jsx` | MODIFY — import SCORE_COLOR_STOPS from mapConstants |
+| `frontend/src/styles/globals.css` | MODIFY — compare + story + toggle button CSS |
+| `backend/services/prompts.py` | MODIFY — add STORY_SYSTEM_PROMPT + build_story_prompt |
+| `backend/routers/insights.py` | MODIFY — add /story/shots + /story/warm-cache endpoints |
+
+## API Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| GET | `/api/insights/story/shots` | 7 shots with LLM narrations |
+| POST | `/api/insights/story/warm-cache` | Pre-generate all story narrations |

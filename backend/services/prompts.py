@@ -1,64 +1,91 @@
 """Prompt templates for LLM insight generation."""
 
+import json
+
+
+PROMPT_VERSION = "v2_structured_reasoning"
+
 SYSTEM_PROMPT = """You are a concise urban walkability analyst for Ho Chi Minh City (HCMC).
 You write short, data-driven insights about street walkability for an exhibition platform.
 Your audience includes urban planners and curious residents exploring HCMC street quality data.
 
 Rules:
-- Write exactly 3-4 sentences.
-- Be specific: reference exact scores, percentiles, and driver names from the data provided.
-- Use plain language, no jargon. No emojis. No markdown formatting.
-- Compare to city averages when relevant.
-- Mention the strongest positive driver and the most limiting factor.
+- Write one compact paragraph in 4-6 sentences.
+- Follow this exact reasoning order:
+  1) Conclusion: overall judgement.
+  2) Evidence: 2-3 key numeric facts.
+  3) Causal explanation: why this profile happens (use drivers).
+  4) City comparison: where it sits versus city context.
+- Mention only the metrics that are necessary to support your reasoning; do not try to mention every metric.
+- Be specific when you cite numbers (scores, rank, percentile, deltas), but keep language plain and non-technical.
 - If the street is notably good or bad in a dimension, say so directly.
 - Do NOT invent or hallucinate any numbers not present in the input data.
-- Output plain text only."""
+- Output plain text only (no markdown, no bullet points)."""
 
 
 def build_insight_prompt(
     street_name: str,
-    rank_info: dict,
-    similar_streets: list,
-    drivers: dict,
+    analysis_payload: dict,
 ) -> tuple[str, str]:
     """Build (system_prompt, user_prompt) for street insight generation."""
 
-    dims = rank_info["dimensions"]
-    total = rank_info["total_streets"]
-
-    # Format rankings
-    rank_lines = []
-    for dim, d in dims.items():
-        label = "Overall Walkability" if dim == "walkability" else dim.capitalize()
-        rank_lines.append(
-            f"- {label}: {d['score']:.1f}/10, rank #{d['rank']} of {total} "
-            f"(percentile {d['percentile']:.0f}%, {d['label']})"
-        )
-
-    # Format drivers
-    driver_lines = []
-    for dim, info in drivers.items():
-        parts = [f"{d['label']}={d['value']:.2f}" for d in info["drivers"]]
-        driver_lines.append(f"  {dim.capitalize()} ({info['score']:.1f}/10): {', '.join(parts)}")
-
-    # Format similar streets
-    similar_lines = []
-    for s in similar_streets[:3]:
-        deltas = ", ".join(f"{k}: {v}" for k, v in s["deltas"].items())
-        similar_lines.append(f"- {s['name']} (distance: {s['distance']:.2f}, deltas: {deltas})")
+    payload_json = json.dumps(analysis_payload, ensure_ascii=False, indent=2, sort_keys=True)
 
     user_prompt = f"""Street: {street_name}
-Total streets in HCMC: {total}
 
-Scores and Rankings:
-{chr(10).join(rank_lines)}
+Use the structured JSON below as your only source of truth:
+{payload_json}
 
-Key Drivers (intermediate formula variables, each 0-1 scale):
-{chr(10).join(driver_lines)}
-
-Most Similar Streets (by combined safety+accessibility+comfort profile):
-{chr(10).join(similar_lines) if similar_lines else "  (none)"}
-
-Write a concise insight paragraph about this street's walkability profile."""
+Write one concise paragraph that follows the 4-step reasoning order from the system prompt."""
 
     return SYSTEM_PROMPT, user_prompt
+
+
+# ── Story Camera Prompts ──────────────────────────────────────────
+
+STORY_SYSTEM_PROMPT = """You are a documentary narrator for a visual walkability study of Ho Chi Minh City.
+Write exactly 1-2 sentences (max 40 words) for a map flyover shot.
+Be evocative and data-driven. Reference exact numbers from the data provided.
+No emojis. No markdown. Plain text only."""
+
+
+def build_story_prompt(
+    shot: dict,
+    city_stats: dict,
+    rank_info: dict | None = None,
+) -> tuple[str, str]:
+    """Build (system_prompt, user_prompt) for a story shot narration."""
+    ctx = shot.get("data_context", {})
+    theme = shot["theme"]
+    name = shot.get("street_name")
+
+    lines = [f"Shot theme: {theme}"]
+
+    if name:
+        lines.append(f"Street: {name}")
+        for dim in ("walkability", "safety", "accessibility", "comfort"):
+            val = ctx.get(dim)
+            if val is not None:
+                lines.append(f"  {dim}: {val}/10")
+
+    if rank_info:
+        dims = rank_info.get("dimensions", {})
+        total = rank_info.get("total_streets", 0)
+        for dim, d in dims.items():
+            label = "Overall Walkability" if dim == "walkability" else dim.capitalize()
+            lines.append(
+                f"  {label}: rank #{d['rank']} of {total} "
+                f"(percentile {d['percentile']:.0f}%)"
+            )
+
+    if "total_streets" in ctx:
+        lines.append(f"Total streets surveyed: {ctx['total_streets']}")
+    if "avg_walkability" in ctx:
+        lines.append(f"City average walkability: {ctx['avg_walkability']:.1f}/10")
+    if "total_districts" in ctx:
+        lines.append(f"Districts covered: {ctx['total_districts']}")
+
+    user_prompt = "\n".join(lines)
+    user_prompt += "\n\nWrite a short, evocative narration for this flyover shot."
+
+    return STORY_SYSTEM_PROMPT, user_prompt
