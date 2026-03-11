@@ -4,6 +4,11 @@ import { useStoryShots } from '../hooks/useStory'
 import { buildColorExpression } from '../utils/mapConstants'
 import StoryNarration from './StoryNarration'
 
+/** Check if a MapLibre map instance is still usable (not removed). */
+function isMapAlive(m) {
+  try { return Boolean(m && m.getStyle()) } catch { return false }
+}
+
 /**
  * StoryCamera — Guided flyTo narrative with 7 pre-defined shots.
  *
@@ -53,7 +58,7 @@ export default function StoryCamera({ map, onExit }) {
   useEffect(() => {
     return () => {
       clearPendingAdvance()
-      if (!map) return
+      if (!isMapAlive(map)) return
       if (map.getLayer('streets-line')) {
         if (originalLineOpacityRef.current != null) {
           map.setPaintProperty('streets-line', 'line-opacity', originalLineOpacityRef.current)
@@ -74,9 +79,8 @@ export default function StoryCamera({ map, onExit }) {
     exitingRef.current = true
     clearPendingAdvance()
 
-    if (map) {
+    if (isMapAlive(map)) {
       map.stop() // cancel any in-progress flyTo
-      // Restore line-opacity
       if (map.getLayer('streets-line') && originalLineOpacityRef.current != null) {
         map.setPaintProperty('streets-line', 'line-opacity', originalLineOpacityRef.current)
       }
@@ -99,7 +103,7 @@ export default function StoryCamera({ map, onExit }) {
       }
     }
     map.on('dragstart', onDragStart)
-    return () => map.off('dragstart', onDragStart)
+    return () => { if (isMapAlive(map)) map.off('dragstart', onDragStart) }
   }, [map, phase, handleExit])
 
   // Add a dedicated point marker layer for current story shot.
@@ -145,7 +149,7 @@ export default function StoryCamera({ map, onExit }) {
     }
 
     return () => {
-      if (!map) return
+      if (!isMapAlive(map)) return
       if (map.getLayer('story-shot-point-label')) map.removeLayer('story-shot-point-label')
       if (map.getLayer('story-shot-point-circle')) map.removeLayer('story-shot-point-circle')
       if (map.getSource('story-shot-point')) map.removeSource('story-shot-point')
@@ -292,7 +296,7 @@ export default function StoryCamera({ map, onExit }) {
     const shot = shots[currentIndex]
     const streetName = shot?.street_name
     if (!streetName) return
-    handleExit()
+    try { handleExit() } catch (e) { console.error('Story exit error:', e) }
     navigate(`/tour/${encodeURIComponent(streetName)}`)
   }, [shots, currentIndex, handleExit, navigate])
 
@@ -309,7 +313,7 @@ export default function StoryCamera({ map, onExit }) {
       handleEnterTour()
     }
     map.on('click', 'streets-line', onStreetClick)
-    return () => map.off('click', 'streets-line', onStreetClick)
+    return () => { if (isMapAlive(map)) map.off('click', 'streets-line', onStreetClick) }
   }, [map, phase, shots, currentIndex, handleEnterTour])
 
   // Start playing when shots are loaded

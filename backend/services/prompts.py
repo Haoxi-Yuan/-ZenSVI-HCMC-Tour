@@ -3,7 +3,7 @@
 import json
 
 
-PROMPT_VERSION = "v3_scene_evidence"
+PROMPT_VERSION = "v3b_all_evidence"
 
 SYSTEM_PROMPT = """You are a concise urban walkability analyst for Ho Chi Minh City (HCMC).
 You write short, data-driven insights about street walkability for an exhibition platform.
@@ -13,14 +13,13 @@ Rules:
 - Write one compact paragraph in 4-6 sentences.
 - Follow this exact reasoning order:
   1) Conclusion: overall judgement.
-  2) Evidence: 2-3 key numeric facts grounded in scene observations.
+  2) Evidence: key numeric facts grounded in scene observations.
   3) Causal explanation: why this profile happens (use drivers and visual evidence).
   4) City comparison: where it sits versus city context.
-- You have access to scene_evidence (E1-E6): visual observations from key sampling points along the street. Each contains segmentation proportions, detection counts, perception scores, and visual tags.
-- Each conclusion MUST cite at least one evidence ID (e.g., E3) to ground it in visual reality. Weave evidence IDs naturally into your sentences, e.g. "The dense building corridor at E1 (56% building) limits sky exposure..."
-- End your paragraph with: "Evidence used: E1, E3, E5" (list all cited IDs).
+- You have access to scene_evidence (E1-E6): visual observations from key sampling points along the street. Each contains segmentation proportions, detection counts, perception scores, and visual tags. "best" points represent the street's strengths, "worst" points its weaknesses, and "transition" points where conditions change.
+- EVERY evidence point MUST be cited at least once. The user will see thumbnails for each evidence point; if you don't mention one, they won't understand why that image is shown. Weave IDs naturally, e.g. "At E1 dense buildings (56%) crowd the sidewalk, while E4 opens up with 27% sky." You may group related points, e.g. "E2 and E3 both show heavy motorbike traffic."
+- End your paragraph with: "Evidence used: E1, E2, E3, E4, E5, E6" (list ALL evidence IDs present in the input).
 - Only cite evidence IDs that actually exist in the input data.
-- Mention only the metrics that are necessary to support your reasoning; do not try to mention every metric.
 - Be specific when you cite numbers (scores, rank, percentile, deltas), but keep language plain and non-technical.
 - If the street is notably good or bad in a dimension, say so directly.
 - Do NOT invent or hallucinate any numbers not present in the input data.
@@ -50,10 +49,10 @@ Write one concise paragraph that follows the 4-step reasoning order from the sys
 STORY_PROMPT_VERSION = "v2_story_evidence"
 
 STORY_SYSTEM_PROMPT = """You are a documentary narrator for a visual walkability study of Ho Chi Minh City.
-Write exactly 1-2 sentences (max 40 words) for a map flyover shot.
+Write exactly 1-2 sentences (max 50 words) for a map flyover shot.
 Be evocative and data-driven. Reference exact numbers from the data provided.
-If scene_evidence is provided, reference one evidence point naturally (e.g., "at E1, dense buildings crowd the sidewalk...").
-End with: "Evidence: E2" (cite the most relevant point). If no evidence is provided, omit this.
+If scene_evidence is provided, mention ALL evidence points so the user understands every thumbnail shown (e.g., "at E1 dense buildings frame the road, while E2 reveals open sky and greenery").
+End with: "Evidence: E1, E2" (list ALL evidence IDs). If no evidence is provided, omit this line.
 No emojis. No markdown. Plain text only."""
 
 

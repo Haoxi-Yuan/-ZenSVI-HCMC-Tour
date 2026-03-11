@@ -30,6 +30,7 @@ export default function PanoramaViewer({
   currentPoint, nextPoint, pointIndex, totalPoints,
 }) {
   const containerRef = useRef(null)
+  const [imageLoadState, setImageLoadState] = useState('idle') // idle | loading | loaded | error
   const sceneRef = useRef(null)
   const isDragging = useRef(false)
   const prevMouse = useRef({ x: 0, y: 0 })
@@ -165,9 +166,17 @@ export default function PanoramaViewer({
 
   // Load images when URLs change
   useEffect(() => {
-    if (!imageUrls || imageUrls.length === 0 || !sceneRef.current) return
+    if (!imageUrls || imageUrls.length === 0 || !sceneRef.current) {
+      setImageLoadState('idle')
+      return
+    }
 
-    const { texture, canvas, ctx } = sceneRef.current
+    setImageLoadState('loading')
+    const { texture, ctx } = sceneRef.current
+
+    // Clear canvas for new point
+    ctx.fillStyle = '#1A1714'
+    ctx.fillRect(0, 0, 2560, 640)
 
     // Sort images by heading to ensure correct order
     const sortedUrls = [...imageUrls].sort((a, b) => {
@@ -177,14 +186,25 @@ export default function PanoramaViewer({
     })
 
     let loaded = 0
+    let failed = 0
+    const total = sortedUrls.length
+
     sortedUrls.forEach((url, i) => {
       const img = new Image()
       img.crossOrigin = 'anonymous'
       img.onload = () => {
         ctx.drawImage(img, i * 640, 0, 640, 640)
         loaded++
-        if (loaded === sortedUrls.length) {
-          texture.needsUpdate = true
+        texture.needsUpdate = true
+        if (loaded + failed === total) {
+          setImageLoadState(loaded > 0 ? 'loaded' : 'error')
+        }
+      }
+      img.onerror = () => {
+        console.warn(`Failed to load panorama image: ${url}`)
+        failed++
+        if (loaded + failed === total) {
+          setImageLoadState(loaded > 0 ? 'loaded' : 'error')
         }
       }
       img.src = url
@@ -194,6 +214,32 @@ export default function PanoramaViewer({
   return (
     <div style={{ position: 'relative', width: '100%', height: '100%' }}>
       <div ref={containerRef} style={{ width: '100%', height: '100%', cursor: 'grab' }} />
+
+      {/* Loading / error overlay */}
+      {(imageLoadState === 'loading' || imageLoadState === 'idle') && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(15, 13, 10, 0.6)',
+          pointerEvents: 'none', zIndex: 5,
+        }}>
+          <div style={{ fontSize: '12px', letterSpacing: '0.15em', textTransform: 'uppercase', color: 'var(--accent-green)' }}>
+            Loading Street View...
+          </div>
+        </div>
+      )}
+      {imageLoadState === 'error' && (
+        <div style={{
+          position: 'absolute', inset: 0,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(15, 13, 10, 0.6)',
+          pointerEvents: 'none', zIndex: 5,
+        }}>
+          <div style={{ fontSize: '12px', letterSpacing: '0.15em', textTransform: 'uppercase', color: '#E85D55' }}>
+            Failed to load images
+          </div>
+        </div>
+      )}
 
       {/* Navigation arrows */}
       {onNavigateBack && (

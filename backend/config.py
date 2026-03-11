@@ -40,3 +40,7 @@ LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o-mini")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 LLM_CACHE_TTL_SECONDS = int(os.environ.get("LLM_CACHE_TTL", str(7 * 24 * 3600)))
+
+# PerceptionSphere data directories
+SPHERE_DATA_DIR = DATA_DIR / "sphere"
+VOLUNTEER_DATA_DIR = Path("/data2/shared/haoxi/projects/ATTENTION/fieldwork/data")

@@ -8,6 +8,7 @@ import FeaturedStreets from '../components/FeaturedStreets'
 import LayerSwitcher from '../components/LayerSwitcher'
 import CompareMode from '../components/CompareMode'
 import StoryCamera from '../components/StoryCamera'
+import ResearchGraph from '../components/ResearchGraph'
 import { useCityStats } from '../hooks/useStreetData'
 
 function Counter({ target, suffix = '', decimals = 0 }) {
@@ -90,11 +91,11 @@ function HeroSection() {
       <div className="hero-scanlines" />
       <div className="hero-content">
         <div className="hero-label">Immersive Walkability Study</div>
-        <h1 className="hero-title">Walking<br /><em>Sai Gon</em></h1>
-        <p className="hero-subtitle-vn">Buoc Chan Sai Gon</p>
+        <h1 className="hero-title">Walking<br /><em>HCMC</em></h1>
+        <p className="hero-subtitle-vn">Buoc Chan HCMC</p>
         <p className="hero-desc">
-          An immersive exploration of walkability across Ho Chi Minh City's 24 districts —
-          revealing how pedestrians navigate a city built for motorbikes, through 267,455
+          An immersive exploration of walkability across Ho Chi Minh City’s 24 districts,
+          revealing how pedestrians navigate a motorbike-oriented city through 267,455
           street-level observations.
         </p>
         <a href="#map-section" className="hero-cta">
@@ -400,7 +401,7 @@ function Footer() {
         fontFamily: "'Playfair Display', serif",
         fontSize: '20px',
         marginBottom: '12px',
-      }}>Buoc Chan Sai Gon</div>
+      }}>Buoc Chan HCMC</div>
       <div style={{
         fontSize: '13px',
         color: 'var(--text-muted)',
@@ -436,6 +437,7 @@ export default function LandingPage() {
       <Navbar transparent />
       <HeroSection />
       <DataSection />
+      <ResearchGraph />
       <MapSection />
       <Footer />
     </>

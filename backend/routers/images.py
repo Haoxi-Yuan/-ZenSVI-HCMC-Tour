@@ -23,9 +23,12 @@ def _get_points_index() -> dict:
 @router.get("/images/{district}/{point_folder}/{image_name}")
 async def get_image(district: str, point_folder: str, image_name: str):
     """Serve a street view image."""
-    image_path = IMAGE_DIR / district / point_folder / image_name
+    # Standardize names: replace spaces with underscores to match filesystem (e.g., "G Vp" -> "G_Vp")
+    district_normalized = district.replace(" ", "_")
+    folder_normalized = point_folder.replace(" ", "_")
+    image_path = IMAGE_DIR / district_normalized / folder_normalized / image_name
     if not image_path.exists():
-        raise HTTPException(404, "Image not found")
+        raise HTTPException(404, f"Image not found at {image_path}")
     return FileResponse(image_path, media_type="image/jpeg")
 
 

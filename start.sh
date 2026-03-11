@@ -28,6 +28,18 @@ for port in 3721 3722; do
   fi
 done
 
+# Ensure logs dir exists before nohup writes to it
+mkdir -p "$PROJECT_DIR/logs"
+
+# Truncate old logs if they exceed 50MB
+MAX_LOG_SIZE=$((50 * 1024 * 1024))
+for logfile in "$PROJECT_DIR/logs/backend.log" "$PROJECT_DIR/logs/frontend.log"; do
+  if [[ -f "$logfile" ]] && [[ $(stat -c%s "$logfile" 2>/dev/null || echo 0) -gt $MAX_LOG_SIZE ]]; then
+    echo "Truncating oversized log: $logfile"
+    : > "$logfile"
+  fi
+done
+
 echo "=== HCMC Street View Tour Platform ==="
 echo ""
 
@@ -60,6 +72,23 @@ echo "  Frontend PID: $FRONTEND_PID"
 echo "$BACKEND_PID" > "$PID_FILE"
 echo "$FRONTEND_PID" >> "$PID_FILE"
 
+# Health check: verify both processes survived startup
+sleep 3
+HEALTH_OK=true
+if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
+  echo "ERROR: Backend (PID $BACKEND_PID) died on startup. Check logs/backend.log"
+  HEALTH_OK=false
+fi
+if ! kill -0 "$FRONTEND_PID" 2>/dev/null; then
+  echo "ERROR: Frontend (PID $FRONTEND_PID) died on startup. Check logs/frontend.log"
+  HEALTH_OK=false
+fi
+if ! $HEALTH_OK; then
+  kill $BACKEND_PID $FRONTEND_PID 2>/dev/null
+  rm -f "$PID_FILE"
+  exit 1
+fi
+
 echo ""
 echo "=== Platform Running ==="
 echo "  Frontend: http://localhost:3721"
@@ -75,7 +104,6 @@ echo "    then open http://localhost:3721 in your browser"
 echo ""
 
 if $BG_MODE; then
-  mkdir -p "$PROJECT_DIR/logs"
   echo "Running in background. Logs:"
   echo "  Backend:  $PROJECT_DIR/logs/backend.log"
   echo "  Frontend: $PROJECT_DIR/logs/frontend.log"

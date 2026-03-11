@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import re
 import traceback
 
 from backend import data_store
@@ -11,6 +12,10 @@ from backend.services.cache_service import cache_get, cache_set
 from backend.services.prompts import build_story_prompt, STORY_PROMPT_VERSION
 from backend.services.analytics import get_street_rank
 from backend.services.scene_evidence import get_scene_evidence
+
+MIN_STORY_POINTS = 80
+POINTS_FALLBACKS = (80, 60, 40, 20, 0)
+SHRINKAGE_K = 120.0
 
 
 def _is_valid_name(name: str) -> bool:
@@ -22,12 +27,94 @@ def _is_valid_name(name: str) -> bool:
     return True
 
 
-def _sorted_streets(dim: str, reverse: bool = True, limit: int = 10):
-    """Return top or bottom streets by dimension, filtering garbage names."""
-    summary = data_store.streets_summary
-    valid = [(k, v) for k, v in summary.items() if _is_valid_name(k)]
-    valid.sort(key=lambda x: x[1].get(dim, 0), reverse=reverse)
-    return valid[:limit]
+def _base_name(name: str) -> str:
+    """Normalize split street names, e.g. 'Foo #3' -> 'Foo'."""
+    return re.sub(r"\s+#\d+$", "", name).strip()
+
+
+def _city_mean(city: dict, dim: str) -> float:
+    return float(city.get(dim, {}).get("stats", {}).get("mean", 0.0))
+
+
+def _adjusted_score(raw: float, points: int, city_mean: float, k: float = SHRINKAGE_K) -> float:
+    """Empirical-Bayes style shrinkage to reduce small-sample extremes."""
+    n = max(points, 0)
+    return (n / (n + k)) * raw + (k / (n + k)) * city_mean
+
+
+def _dimension_candidates(summary: dict, city: dict, dim: str, reverse: bool, min_points: int):
+    """Rank candidates by adjusted score with a minimum points threshold."""
+    mean = _city_mean(city, dim)
+    candidates = []
+    for name, data in summary.items():
+        if not _is_valid_name(name):
+            continue
+        points = int(data.get("points", 0))
+        if points < min_points:
+            continue
+        raw = float(data.get(dim, 0))
+        adjusted = _adjusted_score(raw, points, mean)
+        candidates.append((name, data, adjusted))
+
+    candidates.sort(
+        key=lambda x: (x[2], float(x[1].get(dim, 0)), int(x[1].get("points", 0))),
+        reverse=reverse,
+    )
+    return candidates
+
+
+def _pick_unique_by_base(candidates: list, used_bases: set[str]):
+    for name, data, _ in candidates:
+        base = _base_name(name)
+        if base in used_bases:
+            continue
+        used_bases.add(base)
+        return name, data
+    return None, None
+
+
+def _select_dimension_shot(summary: dict, city: dict, used_bases: set[str], dim: str, reverse: bool):
+    """Select one representative street for a dimension with fallback thresholds."""
+    for min_points in POINTS_FALLBACKS:
+        picked = _pick_unique_by_base(
+            _dimension_candidates(summary, city, dim=dim, reverse=reverse, min_points=min_points),
+            used_bases,
+        )
+        if picked[0]:
+            return picked
+    return None, None
+
+
+def _select_hidden_danger(summary: dict, used_bases: set[str]):
+    """Pick a representative street with high safety but low overall walkability."""
+    criteria = [
+        lambda d: d.get("safety", 0) >= 7.0 and d.get("walkability", 0) < 5.0,
+        lambda d: d.get("safety", 0) >= 6.8 and d.get("walkability", 0) < 5.2,
+        lambda d: d.get("safety", 0) >= 6.5 and d.get("walkability", 0) < 5.5,
+    ]
+    for min_points in POINTS_FALLBACKS:
+        for cond in criteria:
+            candidates = []
+            for name, data in summary.items():
+                if not _is_valid_name(name):
+                    continue
+                if int(data.get("points", 0)) < min_points:
+                    continue
+                if not cond(data):
+                    continue
+                candidates.append((name, data))
+            candidates.sort(key=lambda x: (
+                float(x[1].get("walkability", 0)),
+                -float(x[1].get("safety", 0)),
+                -int(x[1].get("points", 0)),
+            ))
+            for name, data in candidates:
+                base = _base_name(name)
+                if base in used_bases:
+                    continue
+                used_bases.add(base)
+                return name, data
+    return None, None
 
 
 def get_story_shots() -> list[dict]:
@@ -39,6 +126,7 @@ def get_story_shots() -> list[dict]:
     city = data_store.city_stats
 
     shots = []
+    used_bases: set[str] = set()
 
     # Shot 1: City Overview (fixed camera, zoomed out)
     shots.append({
@@ -55,15 +143,17 @@ def get_story_shots() -> list[dict]:
         "focus_property": "walkability",
         "data_context": {
             "total_streets": len(summary),
-            "avg_walkability": city.get("walkability", {}).get("mean", 0),
+            "avg_walkability": _city_mean(city, "walkability"),
             "total_districts": city.get("total_districts", 24),
+            "min_points_threshold": MIN_STORY_POINTS,
         },
     })
 
-    # Shot 2: Best Walkability
-    top_walk = _sorted_streets("walkability", reverse=True, limit=5)
-    if top_walk:
-        name, data = top_walk[0]
+    # Shot 2: Best Walkability (representative)
+    name, data = _select_dimension_shot(
+        summary=summary, city=city, used_bases=used_bases, dim="walkability", reverse=True,
+    )
+    if name and data:
         shots.append({
             "id": 2,
             "theme": "Most Walkable Street",
@@ -81,16 +171,17 @@ def get_story_shots() -> list[dict]:
                 "safety": round(data.get("safety", 0), 2),
                 "accessibility": round(data.get("accessibility", 0), 2),
                 "comfort": round(data.get("comfort", 0), 2),
+                "points": int(data.get("points", 0)),
+                "segments": int(data.get("segments", 0)),
+                "min_points_threshold": MIN_STORY_POINTS,
             },
         })
 
-    # Shot 3: Safest Street
-    top_safe = _sorted_streets("safety", reverse=True, limit=5)
-    if top_safe:
-        # Pick one different from shot 2
-        for name, data in top_safe:
-            if shots[-1]["street_name"] != name:
-                break
+    # Shot 3: Safest Street (representative)
+    name, data = _select_dimension_shot(
+        summary=summary, city=city, used_bases=used_bases, dim="safety", reverse=True,
+    )
+    if name and data:
         shots.append({
             "id": 3,
             "theme": "Safest Street",
@@ -108,16 +199,17 @@ def get_story_shots() -> list[dict]:
                 "safety": round(data.get("safety", 0), 2),
                 "accessibility": round(data.get("accessibility", 0), 2),
                 "comfort": round(data.get("comfort", 0), 2),
+                "points": int(data.get("points", 0)),
+                "segments": int(data.get("segments", 0)),
+                "min_points_threshold": MIN_STORY_POINTS,
             },
         })
 
-    # Shot 4: Most Accessible
-    top_acc = _sorted_streets("accessibility", reverse=True, limit=5)
-    if top_acc:
-        used = {s["street_name"] for s in shots if s["street_name"]}
-        for name, data in top_acc:
-            if name not in used:
-                break
+    # Shot 4: Most Accessible (representative)
+    name, data = _select_dimension_shot(
+        summary=summary, city=city, used_bases=used_bases, dim="accessibility", reverse=True,
+    )
+    if name and data:
         shots.append({
             "id": 4,
             "theme": "Most Accessible Street",
@@ -135,20 +227,14 @@ def get_story_shots() -> list[dict]:
                 "safety": round(data.get("safety", 0), 2),
                 "accessibility": round(data.get("accessibility", 0), 2),
                 "comfort": round(data.get("comfort", 0), 2),
+                "points": int(data.get("points", 0)),
+                "segments": int(data.get("segments", 0)),
+                "min_points_threshold": MIN_STORY_POINTS,
             },
         })
 
     # Shot 5: Hidden Danger — high safety but low overall walkability
-    valid = [(k, v) for k, v in summary.items()
-             if _is_valid_name(k) and v.get("safety", 0) >= 7.0]
-    valid.sort(key=lambda x: x[1].get("walkability", 0))
-    used = {s["street_name"] for s in shots if s["street_name"]}
-    for name, data in valid:
-        if name not in used:
-            break
-    else:
-        name, data = valid[0] if valid else (None, None)
-
+    name, data = _select_hidden_danger(summary=summary, used_bases=used_bases)
     if name and data:
         shots.append({
             "id": 5,
@@ -167,16 +253,17 @@ def get_story_shots() -> list[dict]:
                 "safety": round(data.get("safety", 0), 2),
                 "accessibility": round(data.get("accessibility", 0), 2),
                 "comfort": round(data.get("comfort", 0), 2),
+                "points": int(data.get("points", 0)),
+                "segments": int(data.get("segments", 0)),
+                "min_points_threshold": MIN_STORY_POINTS,
             },
         })
 
-    # Shot 6: Worst Walkability
-    bot_walk = _sorted_streets("walkability", reverse=False, limit=5)
-    if bot_walk:
-        used = {s["street_name"] for s in shots if s["street_name"]}
-        for name, data in bot_walk:
-            if name not in used:
-                break
+    # Shot 6: Worst Walkability (representative)
+    name, data = _select_dimension_shot(
+        summary=summary, city=city, used_bases=used_bases, dim="walkability", reverse=False,
+    )
+    if name and data:
         shots.append({
             "id": 6,
             "theme": "Least Walkable Street",
@@ -194,6 +281,9 @@ def get_story_shots() -> list[dict]:
                 "safety": round(data.get("safety", 0), 2),
                 "accessibility": round(data.get("accessibility", 0), 2),
                 "comfort": round(data.get("comfort", 0), 2),
+                "points": int(data.get("points", 0)),
+                "segments": int(data.get("segments", 0)),
+                "min_points_threshold": MIN_STORY_POINTS,
             },
         })
 

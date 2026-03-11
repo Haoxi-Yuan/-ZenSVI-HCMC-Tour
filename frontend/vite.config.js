@@ -5,6 +5,20 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port: 3721,
+    watch: {
+      usePolling: true,
+      interval: 1000,
+      ignored: ['**/node_modules/**', '**/data/**', '**/.git/**'],
+    },
+    proxy: {
+      '/api': {
+        target: 'http://localhost:3722',
+        changeOrigin: true,
+      },
+    },
+  },
+  preview: {
+    port: 3721,
     proxy: {
       '/api': {
         target: 'http://localhost:3722',
