@@ -36,10 +36,6 @@ const SECONDARY_COLOR = new THREE.Color(0.50, 0.48, 0.44)
 const LABEL_TEXT = { r: 200, g: 180, b: 145 }
 const LANDMARK_TEXT = { r: 230, g: 140, b: 100 }
 
-// LOD thresholds (camera distance from origin)
-const LOD_MID = 16
-const LOD_NEAR = 8
-
 // Subsample all-edges for performance
 const MAX_ALL_EDGES = 100000
 
@@ -154,6 +150,9 @@ export class TopologyNetworkLayer {
       this._buildRoadEdges()
       this._buildRoadLabels()
       this._buildLandmarks()
+
+      console.log(`[Topology] Loaded: ${this._edgesData.length/2} edges, ${this._roadNetwork.length} roads, ${this._landmarks.length} landmarks`)
+      console.log(`[Topology] Major road edges built: ${this._majorLines ? 'yes' : 'no'}, Secondary: ${this._secondaryLines ? 'yes' : 'no'}`)
 
       this._loaded = true
       this._targetOpacity = 1
@@ -404,58 +403,39 @@ export class TopologyNetworkLayer {
       return
     }
 
-    const camDist = this.engine.camera.position.length()
-    const insideCore = this._forceVisible && camDist < 6
-    let lod
-    if (insideCore) lod = 'core'
-    else if (camDist < LOD_NEAR) lod = 'hidden'
-    else if (camDist < LOD_MID) lod = 'mid'
-    else lod = 'far'
-
     const o = this._opacity
 
-    // All street edges
+    // All street edges — always visible when layer is active
     if (this._edgeLines) {
-      const show = lod === 'mid'
-      this._edgeLines.visible = show
-      if (show) this._edgeLines.material.opacity = o * 0.10
+      this._edgeLines.visible = true
+      this._edgeLines.material.opacity = o * 0.25
     }
 
-    // Major roads
+    // Major roads — always visible, prominent
     if (this._majorLines) {
-      const show = lod !== 'hidden'
-      this._majorLines.visible = show
-      if (show) {
-        const pulse = 0.88 + 0.12 * Math.sin(elapsed * 0.0008)
-        this._majorLines.material.opacity = o * (lod === 'core' ? 0.35 : 0.45) * pulse
-      }
+      this._majorLines.visible = true
+      const pulse = 0.90 + 0.10 * Math.sin(elapsed * 0.0008)
+      this._majorLines.material.opacity = o * 0.7 * pulse
     }
 
-    // Secondary roads
+    // Secondary roads — always visible
     if (this._secondaryLines) {
-      const show = lod === 'mid'
-      this._secondaryLines.visible = show
-      if (show) this._secondaryLines.material.opacity = o * 0.18
+      this._secondaryLines.visible = true
+      this._secondaryLines.material.opacity = o * 0.35
     }
 
-    // Labels
-    const showLabels = lod === 'far' || lod === 'core'
-    const labelOp = o * (lod === 'core' ? 0.5 : 0.7)
+    // Labels — always visible
     for (const s of this._labelSprites) {
-      s.visible = showLabels
-      if (showLabels) s.material.opacity = labelOp
+      s.visible = true
+      s.material.opacity = o * 0.8
     }
 
-    // Landmarks
-    const showLm = lod !== 'hidden' && lod !== 'mid'
-    const lmOp = o * (lod === 'core' ? 0.45 : 0.65)
+    // Landmarks — always visible
     for (const { dot, label } of this._landmarkSprites) {
-      dot.visible = showLm
-      label.visible = showLm
-      if (showLm) {
-        dot.material.opacity = lmOp * (0.7 + 0.3 * Math.sin(elapsed * 0.002))
-        label.material.opacity = lmOp
-      }
+      dot.visible = true
+      label.visible = true
+      dot.material.opacity = o * 0.7 * (0.7 + 0.3 * Math.sin(elapsed * 0.002))
+      label.material.opacity = o * 0.75
     }
 
     if (this._opacity <= 0.001) this.group.visible = false
