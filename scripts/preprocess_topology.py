@@ -3,11 +3,19 @@
 preprocess_topology.py — Generate road network topology for sphere overlay.
 
 Uses streets_geojson.json LineStrings (real OSM road geometry) to build
-proper street-level edges, NOT the embedding-based adjacency graph.
+street-level edges, then filters by sphere surface distance and prunes
+all degree-1 dangling endpoints so NO exposed line ends remain.
+
+Pipeline:
+  1. Snap GeoJSON coords to sphere point indices via KD-tree
+  2. Build edge list from consecutive snapped pairs
+  3. Filter out edges whose chord distance on the unit sphere > threshold
+  4. Iteratively prune degree-1 nodes (no dangling endpoints)
+  5. Output clean edge files
 
 Outputs (into data/sphere/):
-  - topology_edges.bin     Float32 pairs [idx_a, idx_b, ...] — all street edges
-  - road_network.json      Major roads with ordered edge pairs
+  - topology_edges.bin     Float32 pairs [idx_a, idx_b, ...] — clean street edges
+  - road_network.json      Major roads with cleaned edge pairs
   - city_landmarks.json    HCMC landmarks mapped to nearest sphere points
 """
 
@@ -29,6 +37,11 @@ SNAP_THRESHOLD_M = 50
 DEG_TO_M_LAT = 111_320
 DEG_TO_M_LON = 111_320 * np.cos(np.radians(10.8))
 
+# Max chord distance on unit sphere to keep an edge.
+# 0.15 keeps ~58% of edges — filters cross-sphere jumps while retaining
+# edges between perception-similar nearby street points.
+CHORD_THRESHOLD = 0.15
+
 
 def load_point_index():
     """Build KD-tree from point_metadata for fast coord→idx lookup."""
@@ -40,13 +53,19 @@ def load_point_index():
     coords = np.empty((n, 2), dtype=np.float64)
     for p in meta:
         i = p["idx"]
-        # Store as (lat_m, lon_m) in meters for distance thresholding
         coords[i, 0] = p["lat"] * DEG_TO_M_LAT
         coords[i, 1] = p["lon"] * DEG_TO_M_LON
 
     tree = cKDTree(coords)
     print(f"  KD-tree built: {n:,} points")
     return tree, coords, n
+
+
+def load_sphere_positions():
+    """Load unit sphere positions for distance filtering."""
+    pos = np.load(SPHERE_DIR / "embedding_cartesian.npy")  # (N, 3)
+    print(f"  Sphere positions loaded: {len(pos):,} points")
+    return pos
 
 
 def snap_coord_to_idx(tree, lon, lat):
@@ -58,11 +77,43 @@ def snap_coord_to_idx(tree, lon, lat):
     return int(idx)
 
 
-# ---------------------------------------------------------------------------
-# 1 + 2. Build all street edges + road_network.json from GeoJSON LineStrings
+def chord_dist(pos, a, b):
+    """Chord distance between two points on the unit sphere."""
+    d = pos[a] - pos[b]
+    return float(np.sqrt(d[0]**2 + d[1]**2 + d[2]**2))
+
+
+def prune_degree1(edges):
+    """Iteratively remove edges that leave degree-1 (dangling) endpoints."""
+    edge_set = set(edges)
+    changed = True
+    iteration = 0
+    while changed:
+        changed = False
+        iteration += 1
+        # Build degree map
+        deg = defaultdict(int)
+        for a, b in edge_set:
+            deg[a] += 1
+            deg[b] += 1
+        # Find edges to remove (either endpoint has degree 1)
+        to_remove = set()
+        for edge in edge_set:
+            a, b = edge
+            if deg[a] == 1 or deg[b] == 1:
+                to_remove.add(edge)
+        if to_remove:
+            edge_set -= to_remove
+            changed = True
+        if iteration > 200:
+            break
+
+    return edge_set
+
+
 # ---------------------------------------------------------------------------
 
-def build_street_edges_and_roads(tree):
+def build_street_edges_and_roads(tree, sphere_pos):
     print("[1/2] Building street edges from GeoJSON LineStrings ...")
 
     with open(DATA_DIR / "streets_geojson.json") as f:
@@ -71,7 +122,6 @@ def build_street_edges_and_roads(tree):
     features = geojson["features"]
     print(f"  {len(features):,} LineString features")
 
-    # Known major road base names
     KNOWN_MAJOR = {
         "Võ Văn Kiệt", "Nguyễn Văn Linh", "Cách Mạng Tháng 8",
         "Trần Hưng Đạo", "Lê Lợi", "Đồng Khởi", "Nam Kỳ Khởi Nghĩa",
@@ -89,10 +139,9 @@ def build_street_edges_and_roads(tree):
         "Nguyễn Tất Thành", "Bùi Viện",
     }
 
-    # Collect edges per road name + all edges globally
-    all_edges = set()
-    road_edges = defaultdict(set)       # base_name → set of (a, b) edge tuples
-    road_points = defaultdict(set)      # base_name → set of point indices
+    # ─── Step 1: Build raw edges from GeoJSON ────────────────
+    all_edges_raw = set()
+    road_edges_raw = defaultdict(set)
     snapped = 0
     missed = 0
 
@@ -104,36 +153,55 @@ def build_street_edges_and_roads(tree):
         if len(coords) < 2:
             continue
 
-        # Snap each coordinate to nearest point index
         idx_seq = []
         for lon, lat in coords:
             idx = snap_coord_to_idx(tree, lon, lat)
             if idx >= 0:
                 snapped += 1
-                # Deduplicate consecutive same-index
                 if not idx_seq or idx_seq[-1] != idx:
                     idx_seq.append(idx)
             else:
                 missed += 1
 
-        # Build edges from consecutive pairs
         for i in range(len(idx_seq) - 1):
             a, b = idx_seq[i], idx_seq[i + 1]
             if a == b:
                 continue
             edge = (min(a, b), max(a, b))
-            all_edges.add(edge)
+            all_edges_raw.add(edge)
             if base_name:
-                road_edges[base_name].add(edge)
-                road_points[base_name].add(a)
-                road_points[base_name].add(b)
+                road_edges_raw[base_name].add(edge)
 
     total_snap = snapped + missed
     print(f"  Snapped: {snapped:,}/{total_snap:,} ({100*snapped/total_snap:.1f}%)")
-    print(f"  Total unique street edges: {len(all_edges):,}")
+    print(f"  Raw unique street edges: {len(all_edges_raw):,}")
 
-    # ─── Write topology_edges.bin (ALL street edges) ─────────
-    sorted_edges = sorted(all_edges)
+    # ─── Step 2: Filter by sphere chord distance ─────────────
+    print(f"  Filtering by chord distance < {CHORD_THRESHOLD} ...")
+    all_edges_filtered = set()
+    for a, b in all_edges_raw:
+        if chord_dist(sphere_pos, a, b) < CHORD_THRESHOLD:
+            all_edges_filtered.add((a, b))
+
+    print(f"  After distance filter: {len(all_edges_filtered):,} edges "
+          f"({100*len(all_edges_filtered)/len(all_edges_raw):.1f}%)")
+
+    # ─── Step 3: Prune degree-1 dangling endpoints ───────────
+    print("  Pruning degree-1 endpoints ...")
+    all_edges_clean = prune_degree1(all_edges_filtered)
+    pruned = len(all_edges_filtered) - len(all_edges_clean)
+    print(f"  After pruning: {len(all_edges_clean):,} edges (removed {pruned:,} dangling)")
+
+    # Verify no degree-1 nodes remain
+    deg = defaultdict(int)
+    for a, b in all_edges_clean:
+        deg[a] += 1
+        deg[b] += 1
+    d1 = sum(1 for v in deg.values() if v == 1)
+    print(f"  Remaining degree-1 nodes: {d1}")
+
+    # ─── Write topology_edges.bin ─────────────────────────────
+    sorted_edges = sorted(all_edges_clean)
     buf = bytearray(len(sorted_edges) * 2 * 4)
     for i, (a, b) in enumerate(sorted_edges):
         struct.pack_into("ff", buf, i * 8, float(a), float(b))
@@ -143,34 +211,45 @@ def build_street_edges_and_roads(tree):
         f.write(buf)
     print(f"  Written {out_path} ({len(buf)/1024/1024:.1f} MB)")
 
-    # ─── Build road_network.json ─────────────────────────────
-    # Select major roads + top by edge count
-    roads_by_edges = sorted(road_edges.items(), key=lambda x: -len(x[1]))
+    # ─── Build road_network.json with same filtering ─────────
+    # Apply distance filter + pruning per road
+    road_network = []
+    roads_by_edges = sorted(road_edges_raw.items(), key=lambda x: -len(x[1]))
     selected = set()
     for name in KNOWN_MAJOR:
-        if name in road_edges:
+        if name in road_edges_raw:
             selected.add(name)
     for name, _ in roads_by_edges:
         if len(selected) >= 120:
             break
         selected.add(name)
 
-    road_network = []
     for name in sorted(selected):
-        edges = road_edges[name]
-        points = road_points[name]
-        if len(edges) < 2:
+        raw = road_edges_raw[name]
+        # Filter by chord distance
+        filt = {e for e in raw if chord_dist(sphere_pos, e[0], e[1]) < CHORD_THRESHOLD}
+        # Prune degree-1 within this road's subgraph
+        clean = prune_degree1(filt)
+        if len(clean) < 2:
             continue
+
+        points = set()
+        for a, b in clean:
+            points.add(a)
+            points.add(b)
 
         is_major = name in KNOWN_MAJOR
 
-        # Pick label anchor: median point by index (rough center of road on sphere)
-        sorted_pts = sorted(points)
-        label_idx = sorted_pts[len(sorted_pts) // 2]
+        # Label anchor: pick a point with high degree in this road's subgraph
+        road_deg = defaultdict(int)
+        for a, b in clean:
+            road_deg[a] += 1
+            road_deg[b] += 1
+        label_idx = max(road_deg, key=road_deg.get)
 
         road_network.append({
             "name": name,
-            "edges": [list(e) for e in sorted(edges)],
+            "edges": [list(e) for e in sorted(clean)],
             "point_count": len(points),
             "is_major": is_major,
             "label_idx": label_idx,
@@ -189,7 +268,7 @@ def build_street_edges_and_roads(tree):
 
 
 # ---------------------------------------------------------------------------
-# 3. City landmarks
+# City landmarks
 # ---------------------------------------------------------------------------
 
 def build_landmarks():
@@ -256,7 +335,8 @@ def build_landmarks():
 def main():
     print("=== preprocess_topology.py ===")
     tree, coords, n = load_point_index()
-    build_street_edges_and_roads(tree)
+    sphere_pos = load_sphere_positions()
+    build_street_edges_and_roads(tree, sphere_pos)
     build_landmarks()
     print("Done.")
 
