@@ -1,22 +1,20 @@
 #!/usr/bin/env python3
 """
-preprocess_topology.py — Generate road network topology for sphere overlay.
+preprocess_topology.py — Generate road network topology + district boundaries
+for sphere overlay.
 
 Uses streets_geojson.json LineStrings (real OSM road geometry) to build
-street-level edges, then filters by sphere surface distance and prunes
-all degree-1 dangling endpoints so NO exposed line ends remain.
+street-level edges, then filters by sphere surface distance, prunes
+degree-1 endpoints, removes small components and sharp-angle edges.
 
-Pipeline:
-  1. Snap GeoJSON coords to sphere point indices via KD-tree
-  2. Build edge list from consecutive snapped pairs
-  3. Filter out edges whose chord distance on the unit sphere > threshold
-  4. Iteratively prune degree-1 nodes (no dangling endpoints)
-  5. Output clean edge files
+Also projects HCMC district boundaries (hochiminh_districts.geojson) onto
+the sphere by mapping each boundary coordinate to its nearest sphere point.
 
 Outputs (into data/sphere/):
   - topology_edges.bin     Float32 pairs [idx_a, idx_b, ...] — clean street edges
   - road_network.json      Major roads with cleaned edge pairs
   - city_landmarks.json    HCMC landmarks mapped to nearest sphere points
+  - district_boundaries.json  District polygons projected onto sphere point indices
 """
 
 import json
@@ -30,6 +28,7 @@ from scipy.spatial import cKDTree
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SPHERE_DIR = DATA_DIR / "sphere"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 
 # Max distance (meters) to snap a GeoJSON coordinate to a sphere point
 SNAP_THRESHOLD_M = 50
@@ -38,8 +37,6 @@ DEG_TO_M_LAT = 111_320
 DEG_TO_M_LON = 111_320 * np.cos(np.radians(10.8))
 
 # Max chord distance on unit sphere to keep an edge.
-# 0.15 keeps ~58% of edges — filters cross-sphere jumps while retaining
-# edges between perception-similar nearby street points.
 CHORD_THRESHOLD = 0.15
 
 
@@ -51,14 +48,18 @@ def load_point_index():
 
     n = len(meta)
     coords = np.empty((n, 2), dtype=np.float64)
+    lats = np.empty(n, dtype=np.float64)
+    lons = np.empty(n, dtype=np.float64)
     for p in meta:
         i = p["idx"]
         coords[i, 0] = p["lat"] * DEG_TO_M_LAT
         coords[i, 1] = p["lon"] * DEG_TO_M_LON
+        lats[i] = p["lat"]
+        lons[i] = p["lon"]
 
     tree = cKDTree(coords)
     print(f"  KD-tree built: {n:,} points")
-    return tree, coords, n
+    return tree, coords, n, lats, lons
 
 
 def load_sphere_positions():
@@ -91,12 +92,10 @@ def prune_degree1(edges):
     while changed:
         changed = False
         iteration += 1
-        # Build degree map
         deg = defaultdict(int)
         for a, b in edge_set:
             deg[a] += 1
             deg[b] += 1
-        # Find edges to remove (either endpoint has degree 1)
         to_remove = set()
         for edge in edge_set:
             a, b = edge
@@ -107,14 +106,83 @@ def prune_degree1(edges):
             changed = True
         if iteration > 200:
             break
-
     return edge_set
 
 
+def _remove_sharp_angles(edges, sphere_pos, min_cos=-0.3):
+    """Remove edges at degree-2 nodes where the angle is too sharp.
+
+    At each node with exactly 2 neighbors, compute the cosine of the angle
+    formed by the two incident edge vectors. If cos(angle) > min_cos
+    (angle < ~107°), remove the shorter edge to break the sharp bend.
+    """
+    adj = defaultdict(set)
+    for a, b in edges:
+        adj[a].add(b)
+        adj[b].add(a)
+
+    to_remove = set()
+    for node, neighbors in adj.items():
+        if len(neighbors) != 2:
+            continue
+        n1, n2 = list(neighbors)
+        v1 = sphere_pos[n1] - sphere_pos[node]
+        v2 = sphere_pos[n2] - sphere_pos[node]
+        norm1 = np.linalg.norm(v1)
+        norm2 = np.linalg.norm(v2)
+        if norm1 < 1e-10 or norm2 < 1e-10:
+            continue
+        cos_angle = float(np.dot(v1, v2) / (norm1 * norm2))
+        if cos_angle > min_cos:  # Sharp angle
+            e1 = (min(node, n1), max(node, n1))
+            e2 = (min(node, n2), max(node, n2))
+            to_remove.add(e1 if norm1 < norm2 else e2)
+
+    result = edges - to_remove
+    print(f"    Removed {len(to_remove)} sharp-angle edges")
+    return result
+
+
+def _remove_small_components(edges, min_edges=10):
+    """Remove connected components with fewer than min_edges edges."""
+    adj = defaultdict(set)
+    for a, b in edges:
+        adj[a].add(b)
+        adj[b].add(a)
+
+    visited = set()
+    components = []
+    for node in adj:
+        if node in visited:
+            continue
+        comp_nodes = set()
+        queue = [node]
+        while queue:
+            n = queue.pop()
+            if n in visited:
+                continue
+            visited.add(n)
+            comp_nodes.add(n)
+            for nb in adj[n]:
+                if nb not in visited:
+                    queue.append(nb)
+        components.append(comp_nodes)
+
+    result = set()
+    for comp_nodes in components:
+        comp_edges = {(a, b) for a, b in edges if a in comp_nodes}
+        if len(comp_edges) >= min_edges:
+            result |= comp_edges
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# 1. Street edges + road network
 # ---------------------------------------------------------------------------
 
 def build_street_edges_and_roads(tree, sphere_pos):
-    print("[1/2] Building street edges from GeoJSON LineStrings ...")
+    print("[1/3] Building street edges from GeoJSON LineStrings ...")
 
     with open(DATA_DIR / "streets_geojson.json") as f:
         geojson = json.load(f)
@@ -189,10 +257,22 @@ def build_street_edges_and_roads(tree, sphere_pos):
     # ─── Step 3: Prune degree-1 dangling endpoints ───────────
     print("  Pruning degree-1 endpoints ...")
     all_edges_clean = prune_degree1(all_edges_filtered)
-    pruned = len(all_edges_filtered) - len(all_edges_clean)
-    print(f"  After pruning: {len(all_edges_clean):,} edges (removed {pruned:,} dangling)")
+    print(f"  After pruning: {len(all_edges_clean):,} edges")
 
-    # Verify no degree-1 nodes remain
+    # ─── Step 4: Remove small connected components ──────────
+    print("  Removing small connected components ...")
+    all_edges_clean = _remove_small_components(all_edges_clean, min_edges=10)
+    print(f"  After component filter: {len(all_edges_clean):,} edges")
+
+    # ─── Step 5: Remove sharp-angle edges ─────────────────────
+    print("  Filtering sharp-angle edges ...")
+    all_edges_clean = _remove_sharp_angles(all_edges_clean, sphere_pos, min_cos=-0.3)
+    # Re-prune + re-filter after angle removal
+    all_edges_clean = prune_degree1(all_edges_clean)
+    all_edges_clean = _remove_small_components(all_edges_clean, min_edges=10)
+    print(f"  After angle filter + cleanup: {len(all_edges_clean):,} edges")
+
+    # Verify
     deg = defaultdict(int)
     for a, b in all_edges_clean:
         deg[a] += 1
@@ -200,7 +280,7 @@ def build_street_edges_and_roads(tree, sphere_pos):
     d1 = sum(1 for v in deg.values() if v == 1)
     print(f"  Remaining degree-1 nodes: {d1}")
 
-    # ─── Write topology_edges.bin ─────────────────────────────
+    # ─── Write topology_edges.bin (AFTER all filtering) ───────
     sorted_edges = sorted(all_edges_clean)
     buf = bytearray(len(sorted_edges) * 2 * 4)
     for i, (a, b) in enumerate(sorted_edges):
@@ -211,8 +291,7 @@ def build_street_edges_and_roads(tree, sphere_pos):
         f.write(buf)
     print(f"  Written {out_path} ({len(buf)/1024/1024:.1f} MB)")
 
-    # ─── Build road_network.json with same filtering ─────────
-    # Apply distance filter + pruning per road
+    # ─── Build road_network.json ──────────────────────────────
     road_network = []
     roads_by_edges = sorted(road_edges_raw.items(), key=lambda x: -len(x[1]))
     selected = set()
@@ -226,11 +305,8 @@ def build_street_edges_and_roads(tree, sphere_pos):
 
     for name in sorted(selected):
         raw = road_edges_raw[name]
-        # Filter by chord distance
-        filt = {e for e in raw if chord_dist(sphere_pos, e[0], e[1]) < CHORD_THRESHOLD}
-        # Prune degree-1 within this road's subgraph
-        clean = prune_degree1(filt)
-        if len(clean) < 2:
+        clean = raw & all_edges_clean
+        if len(clean) < 3:
             continue
 
         points = set()
@@ -240,7 +316,6 @@ def build_street_edges_and_roads(tree, sphere_pos):
 
         is_major = name in KNOWN_MAJOR
 
-        # Label anchor: pick a point with high degree in this road's subgraph
         road_deg = defaultdict(int)
         for a, b in clean:
             road_deg[a] += 1
@@ -268,17 +343,11 @@ def build_street_edges_and_roads(tree, sphere_pos):
 
 
 # ---------------------------------------------------------------------------
-# City landmarks
+# 2. City landmarks
 # ---------------------------------------------------------------------------
 
-def build_landmarks():
-    print("[2/2] Building city_landmarks.json ...")
-
-    with open(SPHERE_DIR / "point_metadata.json") as f:
-        point_meta = json.load(f)
-
-    lats = np.array([p["lat"] for p in point_meta], dtype=np.float64)
-    lons = np.array([p["lon"] for p in point_meta], dtype=np.float64)
+def build_landmarks(lats, lons):
+    print("[2/3] Building city_landmarks.json ...")
 
     landmarks = [
         {"name": "Ben Thanh Market", "name_vi": "Chợ Bến Thành", "lat": 10.7725, "lon": 106.6980, "type": "landmark"},
@@ -331,13 +400,153 @@ def build_landmarks():
 
 
 # ---------------------------------------------------------------------------
+# 3. District boundaries → sphere projection
+# ---------------------------------------------------------------------------
+
+def build_district_boundaries(tree, lats, lons):
+    """Project HCMC district boundary polygons onto the sphere.
+
+    For each polygon boundary coordinate, find the nearest sphere point.
+    This maps geographic district outlines onto the perception sphere,
+    maintaining alignment with road network and image points.
+    """
+    print("[3/3] Building district_boundaries.json ...")
+
+    geojson_path = PROJECT_ROOT / "hochiminh_districts.geojson"
+    if not geojson_path.exists():
+        # Fallback: check in data dir
+        geojson_path = DATA_DIR / "hochiminh_districts.geojson"
+    if not geojson_path.exists():
+        print("  WARNING: hochiminh_districts.geojson not found, skipping")
+        return
+
+    with open(geojson_path) as f:
+        geojson = json.load(f)
+
+    n_points = len(lats)
+    districts = []
+
+    for feat in geojson["features"]:
+        props = feat["properties"]
+        name = props.get("NAME_2", "")
+        name_vn = props.get("NL_NAME_2") or props.get("VARNAME_2", name)
+        district_type = props.get("TYPE_2", "")
+        eng_type = props.get("ENGTYPE_2", "")
+
+        geom = feat["geometry"]
+        if geom["type"] == "Polygon":
+            rings = geom["coordinates"]
+        elif geom["type"] == "MultiPolygon":
+            # Flatten: take all outer rings
+            rings = [poly[0] for poly in geom["coordinates"]]
+        else:
+            continue
+
+        # For each ring, snap boundary coords to sphere point indices
+        boundary_rings = []
+        for ring in rings:
+            idx_seq = []
+            for lon, lat_coord in ring:
+                # Use larger snap threshold for boundaries (they may be
+                # outside the densely-sampled area)
+                query = [lat_coord * DEG_TO_M_LAT, lon * DEG_TO_M_LON]
+                dist, idx = tree.query(query)
+                # Use 500m threshold for district boundaries (much larger area)
+                if dist < 500:
+                    idx = int(idx)
+                    # Deduplicate consecutive
+                    if not idx_seq or idx_seq[-1] != idx:
+                        idx_seq.append(idx)
+
+            if len(idx_seq) >= 3:
+                # Close the ring
+                if idx_seq[0] != idx_seq[-1]:
+                    idx_seq.append(idx_seq[0])
+                boundary_rings.append(idx_seq)
+
+        if not boundary_rings:
+            continue
+
+        # Find which sphere points are inside this district (geographic containment)
+        # Use a simple point-in-polygon test on lat/lon
+        member_indices = _points_in_polygon(lats, lons, rings[0])
+
+        # Centroid point for label placement
+        centroid_lat = np.mean([c[1] for c in rings[0]])
+        centroid_lon = np.mean([c[0] for c in rings[0]])
+        dlat = lats - centroid_lat
+        dlon = lons - centroid_lon
+        dist2 = dlat ** 2 + (dlon * np.cos(np.radians(centroid_lat))) ** 2
+        centroid_idx = int(np.argmin(dist2))
+
+        districts.append({
+            "name": name,
+            "name_vn": name_vn,
+            "type": district_type,
+            "eng_type": eng_type,
+            "boundary_rings": boundary_rings,
+            "member_count": len(member_indices),
+            "centroid_idx": centroid_idx,
+        })
+
+    districts.sort(key=lambda d: d["name"])
+
+    out_path = SPHERE_DIR / "district_boundaries.json"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(districts, f, ensure_ascii=False, separators=(",", ":"))
+
+    total_boundary_pts = sum(
+        sum(len(r) for r in d["boundary_rings"]) for d in districts
+    )
+    print(f"  {len(districts)} districts, {total_boundary_pts:,} boundary points")
+    print(f"  Written {out_path}")
+
+
+def _points_in_polygon(lats, lons, polygon_ring):
+    """Simple ray-casting point-in-polygon for geographic coordinates.
+    Returns list of point indices inside the polygon.
+    """
+    # polygon_ring: list of [lon, lat] pairs
+    poly_x = np.array([c[0] for c in polygon_ring])
+    poly_y = np.array([c[1] for c in polygon_ring])
+    n_poly = len(poly_x)
+
+    # Bounding box filter first
+    min_x, max_x = poly_x.min(), poly_x.max()
+    min_y, max_y = poly_y.min(), poly_y.max()
+
+    candidates = np.where(
+        (lons >= min_x) & (lons <= max_x) &
+        (lats >= min_y) & (lats <= max_y)
+    )[0]
+
+    inside = []
+    for idx in candidates:
+        px, py = float(lons[idx]), float(lats[idx])
+        crossings = 0
+        for i in range(n_poly):
+            j = (i + 1) % n_poly
+            yi, yj = poly_y[i], poly_y[j]
+            xi, xj = poly_x[i], poly_x[j]
+            if (yi <= py < yj) or (yj <= py < yi):
+                x_cross = xi + (py - yi) * (xj - xi) / (yj - yi)
+                if px < x_cross:
+                    crossings += 1
+        if crossings % 2 == 1:
+            inside.append(int(idx))
+
+    return inside
+
+
+# ---------------------------------------------------------------------------
 
 def main():
     print("=== preprocess_topology.py ===")
-    tree, coords, n = load_point_index()
+    tree, coords, n, lats, lons = load_point_index()
     sphere_pos = load_sphere_positions()
     build_street_edges_and_roads(tree, sphere_pos)
-    build_landmarks()
+    build_landmarks(lats, lons)
+    build_district_boundaries(tree, lats, lons)
     print("Done.")
 
 

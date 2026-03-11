@@ -1,18 +1,9 @@
 /**
- * TopologyNetworkLayer — Real road network topology on the sphere surface.
+ * TopologyNetworkLayer — Road network, district boundaries, landmarks on sphere.
  *
- * Edges come from GeoJSON LineString coordinate sequences (OSM road geometry),
- * NOT from the embedding-based adjacency graph. Each edge pair represents
- * consecutive points along an actual street.
- *
- * All lines are drawn as geodesic arcs (slerp interpolation) that hug the
- * sphere surface instead of cutting through the interior.
- *
- * Visual elements:
- *   1. All street edges: faint lines forming the full road mesh
- *   2. Major road edges: brighter gold lines for named arterials
- *   3. Micro-labels: tiny map-style text for major road names
- *   4. Landmark dots: small glowing points with minimal text
+ * All lines drawn as geodesic arcs (slerp) hugging the sphere surface.
+ * Roads render BELOW tiles; labels/landmarks render ABOVE.
+ * District boundaries shown as dashed-style closed polygons.
  */
 
 import * as THREE from 'three'
@@ -20,37 +11,31 @@ import { SPHERE_RADIUS } from '../../../utils/sphereConstants'
 
 const API = '/api/sphere'
 
-// Radii — roads sit just above sphere faces
-const SURFACE_R = SPHERE_RADIUS * 1.003
-const MAJOR_R = SPHERE_RADIUS * 1.005
-const LABEL_R = SPHERE_RADIUS * 1.018
-const LANDMARK_R = SPHERE_RADIUS * 1.014
+// Radii — roads BELOW tiles, labels/landmarks ABOVE
+const SURFACE_R = SPHERE_RADIUS * 0.996
+const MAJOR_R = SPHERE_RADIUS * 0.997
+const DISTRICT_R = SPHERE_RADIUS * 0.998
+const LABEL_R = SPHERE_RADIUS * 1.012
+const LANDMARK_R = SPHERE_RADIUS * 1.010
 
-// Geodesic arc interpolation steps per edge
 const ARC_STEPS = 5
+const MAX_ALL_EDGES = 100000
 
 // Colors
 const EDGE_COLOR = new THREE.Color(0.30, 0.30, 0.34)
 const MAJOR_COLOR = new THREE.Color(0.85, 0.65, 0.30)
 const SECONDARY_COLOR = new THREE.Color(0.50, 0.48, 0.44)
+const DISTRICT_COLOR = new THREE.Color(0.45, 0.70, 0.85)
 const LABEL_TEXT = { r: 200, g: 180, b: 145 }
 const LANDMARK_TEXT = { r: 230, g: 140, b: 100 }
+const DISTRICT_LABEL = { r: 120, g: 180, b: 220 }
 
-// Subsample all-edges for performance
-const MAX_ALL_EDGES = 100000
-
-// Reusable vectors for slerp
 const _vA = new THREE.Vector3()
 const _vB = new THREE.Vector3()
 const _vT = new THREE.Vector3()
 
-/**
- * Spherical linear interpolation between two unit vectors.
- * Result is written to `out` and normalized, then scaled by `radius`.
- */
 function slerpToSurface(vA, vB, t, radius, out) {
   const dot = Math.max(-1, Math.min(1, vA.dot(vB)))
-  // For nearly identical directions, lerp is fine
   if (Math.abs(dot) > 0.9999) {
     out.lerpVectors(vA, vB, t).normalize().multiplyScalar(radius)
     return
@@ -66,33 +51,15 @@ function slerpToSurface(vA, vB, t, radius, out) {
   ).multiplyScalar(radius)
 }
 
-/**
- * Build a geodesic arc (array of 3D positions) between two point indices.
- * Returns flat array [x0,y0,z0, x1,y1,z1, ...] with ARC_STEPS+1 points.
- */
-function arcPositions(positions, idxA, idxB, radius, steps) {
+function pushArc(positions, idxA, idxB, radius, steps, posArr, colArr, color) {
   _vA.set(positions[idxA * 3], positions[idxA * 3 + 1], positions[idxA * 3 + 2])
   _vB.set(positions[idxB * 3], positions[idxB * 3 + 1], positions[idxB * 3 + 2])
-
-  const result = []
-  for (let i = 0; i <= steps; i++) {
-    slerpToSurface(_vA, _vB, i / steps, radius, _vT)
-    result.push(_vT.x, _vT.y, _vT.z)
-  }
-  return result
-}
-
-/**
- * Push arc line-segment pairs into position/color arrays.
- * Each arc of N steps produces N line segments (2 vertices each).
- */
-function pushArc(positions, idxA, idxB, radius, steps, posArr, colArr, color) {
-  const arc = arcPositions(positions, idxA, idxB, radius, steps)
   for (let i = 0; i < steps; i++) {
-    const j = i * 3
-    const k = (i + 1) * 3
-    posArr.push(arc[j], arc[j + 1], arc[j + 2])
-    posArr.push(arc[k], arc[k + 1], arc[k + 2])
+    const t0 = i / steps, t1 = (i + 1) / steps
+    slerpToSurface(_vA, _vB, t0, radius, _vT)
+    posArr.push(_vT.x, _vT.y, _vT.z)
+    slerpToSurface(_vA, _vB, t1, radius, _vT)
+    posArr.push(_vT.x, _vT.y, _vT.z)
     colArr.push(color.r, color.g, color.b, color.r, color.g, color.b)
   }
 }
@@ -107,8 +74,10 @@ export class TopologyNetworkLayer {
     this._edgeLines = null
     this._majorLines = null
     this._secondaryLines = null
+    this._districtLines = null
     this._labelSprites = []
     this._landmarkSprites = []
+    this._districtLabelSprites = []
 
     this._loaded = false
     this._opacity = 0
@@ -125,10 +94,11 @@ export class TopologyNetworkLayer {
 
   async _loadData() {
     try {
-      const [edgesRes, roadRes, landmarkRes] = await Promise.all([
+      const [edgesRes, roadRes, landmarkRes, districtRes] = await Promise.all([
         fetch(`${API}/binary/topology_edges`),
         fetch(`${API}/road_network`),
         fetch(`${API}/landmarks`),
+        fetch(`${API}/district_boundaries`),
       ])
 
       if (!edgesRes.ok || !roadRes.ok || !landmarkRes.ok) {
@@ -145,14 +115,15 @@ export class TopologyNetworkLayer {
       this._edgesData = new Float32Array(edgesBuf)
       this._roadNetwork = roads
       this._landmarks = landmarks
+      this._districts = districtRes.ok ? await districtRes.json() : []
 
       this._buildAllEdges()
       this._buildRoadEdges()
       this._buildRoadLabels()
       this._buildLandmarks()
+      this._buildDistrictBoundaries()
 
-      console.log(`[Topology] Loaded: ${this._edgesData.length/2} edges, ${this._roadNetwork.length} roads, ${this._landmarks.length} landmarks`)
-      console.log(`[Topology] Major road edges built: ${this._majorLines ? 'yes' : 'no'}, Secondary: ${this._secondaryLines ? 'yes' : 'no'}`)
+      console.log(`[Topology] ${this._edgesData.length/2} edges, ${roads.length} roads, ${landmarks.length} landmarks, ${this._districts.length} districts`)
 
       this._loaded = true
       this._targetOpacity = 1
@@ -162,18 +133,14 @@ export class TopologyNetworkLayer {
     }
   }
 
-  // ─── All street edges (thin geodesic arcs) ────────────────────
+  // ─── All street edges ─────────────────────────────────────────
 
   _buildAllEdges() {
     const data = this._edgesData
     const totalEdges = data.length / 2
-    const step = totalEdges > MAX_ALL_EDGES
-      ? Math.ceil(totalEdges / MAX_ALL_EDGES)
-      : 1
+    const step = totalEdges > MAX_ALL_EDGES ? Math.ceil(totalEdges / MAX_ALL_EDGES) : 1
 
-    const posArr = []
-    const colArr = []
-
+    const posArr = [], colArr = []
     for (let i = 0; i < totalEdges; i += step) {
       const idxA = Math.round(data[i * 2])
       const idxB = Math.round(data[i * 2 + 1])
@@ -186,18 +153,14 @@ export class TopologyNetworkLayer {
     geo.setAttribute('color', new THREE.Float32BufferAttribute(colArr, 3))
 
     this._edgeLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
-      vertexColors: true,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      toneMapped: false,
+      vertexColors: true, transparent: true, opacity: 0,
+      depthWrite: false, toneMapped: false,
     }))
-    this._edgeLines.renderOrder = 1
-    this._edgeLines.visible = false
+    this._edgeLines.renderOrder = -3
     this.group.add(this._edgeLines)
   }
 
-  // ─── Road edges (geodesic arcs with color coding) ─────────────
+  // ─── Road edges ───────────────────────────────────────────────
 
   _buildRoadEdges() {
     if (!this._roadNetwork?.length) return
@@ -207,10 +170,9 @@ export class TopologyNetworkLayer {
 
     for (const road of this._roadNetwork) {
       if (!road.edges?.length) continue
-
       const isMajor = road.is_major
       const color = isMajor ? MAJOR_COLOR : SECONDARY_COLOR
-      const r = isMajor ? MAJOR_R : SURFACE_R * 1.002
+      const r = isMajor ? MAJOR_R : SURFACE_R * 1.001
       const posArr = isMajor ? majorPos : secPos
       const colArr = isMajor ? majorCol : secCol
 
@@ -225,13 +187,10 @@ export class TopologyNetworkLayer {
       geo.setAttribute('position', new THREE.Float32BufferAttribute(majorPos, 3))
       geo.setAttribute('color', new THREE.Float32BufferAttribute(majorCol, 3))
       this._majorLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
-        vertexColors: true,
-        transparent: true,
-        opacity: 0,
-        depthWrite: false,
-        toneMapped: false,
+        vertexColors: true, transparent: true, opacity: 0,
+        depthWrite: false, toneMapped: false,
       }))
-      this._majorLines.renderOrder = 3
+      this._majorLines.renderOrder = -1
       this.group.add(this._majorLines)
     }
 
@@ -240,24 +199,66 @@ export class TopologyNetworkLayer {
       geo.setAttribute('position', new THREE.Float32BufferAttribute(secPos, 3))
       geo.setAttribute('color', new THREE.Float32BufferAttribute(secCol, 3))
       this._secondaryLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
-        vertexColors: true,
-        transparent: true,
-        opacity: 0,
-        depthWrite: false,
-        toneMapped: false,
+        vertexColors: true, transparent: true, opacity: 0,
+        depthWrite: false, toneMapped: false,
       }))
-      this._secondaryLines.renderOrder = 2
+      this._secondaryLines.renderOrder = -2
       this.group.add(this._secondaryLines)
     }
   }
 
-  // ─── Micro-labels ─────────────────────────────────────────────
+  // ─── District boundaries ──────────────────────────────────────
+
+  _buildDistrictBoundaries() {
+    if (!this._districts?.length) return
+
+    const posArr = [], colArr = []
+
+    for (const district of this._districts) {
+      for (const ring of district.boundary_rings) {
+        for (let i = 0; i < ring.length - 1; i++) {
+          const idxA = ring[i]
+          const idxB = ring[i + 1]
+          if (idxA * 3 + 2 >= this.positions.length || idxB * 3 + 2 >= this.positions.length) continue
+          pushArc(this.positions, idxA, idxB, DISTRICT_R, ARC_STEPS, posArr, colArr, DISTRICT_COLOR)
+        }
+      }
+
+      // District name label at centroid
+      const cidx = district.centroid_idx
+      if (cidx != null && cidx * 3 + 2 < this.positions.length) {
+        const displayName = district.name_vn || district.name
+        const sprite = this._microLabel(displayName, DISTRICT_LABEL, 0.35)
+        const lr = LABEL_R * 1.005
+        sprite.position.set(
+          this.positions[cidx * 3] * lr,
+          this.positions[cidx * 3 + 1] * lr,
+          this.positions[cidx * 3 + 2] * lr,
+        )
+        sprite.renderOrder = 8
+        this._districtLabelSprites.push(sprite)
+        this.group.add(sprite)
+      }
+    }
+
+    if (posArr.length) {
+      const geo = new THREE.BufferGeometry()
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3))
+      geo.setAttribute('color', new THREE.Float32BufferAttribute(colArr, 3))
+      this._districtLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+        vertexColors: true, transparent: true, opacity: 0,
+        depthWrite: false, toneMapped: false,
+      }))
+      this._districtLines.renderOrder = -2
+      this.group.add(this._districtLines)
+    }
+  }
+
+  // ─── Road labels ──────────────────────────────────────────────
 
   _buildRoadLabels() {
     if (!this._roadNetwork?.length) return
-    const majorRoads = this._roadNetwork.filter(r => r.is_major)
-
-    for (const road of majorRoads) {
+    for (const road of this._roadNetwork.filter(r => r.is_major)) {
       const idx = road.label_idx
       if (idx == null || idx * 3 + 2 >= this.positions.length) continue
 
@@ -267,13 +268,13 @@ export class TopologyNetworkLayer {
         this.positions[idx * 3 + 1] * LABEL_R,
         this.positions[idx * 3 + 2] * LABEL_R,
       )
-      sprite.renderOrder = 5
+      sprite.renderOrder = 10
       this._labelSprites.push(sprite)
       this.group.add(sprite)
     }
   }
 
-  // ─── Landmark micro-dots ──────────────────────────────────────
+  // ─── Landmarks ────────────────────────────────────────────────
 
   _buildLandmarks() {
     if (!this._landmarks?.length) return
@@ -288,7 +289,7 @@ export class TopologyNetworkLayer {
         this.positions[idx * 3 + 1] * LANDMARK_R,
         this.positions[idx * 3 + 2] * LANDMARK_R,
       )
-      dot.renderOrder = 6
+      dot.renderOrder = 11
 
       const label = this._microLabel(lm.name_vi || lm.name, LANDMARK_TEXT, 0.22)
       const lr = LANDMARK_R * 1.015
@@ -297,7 +298,7 @@ export class TopologyNetworkLayer {
         this.positions[idx * 3 + 1] * lr,
         this.positions[idx * 3 + 2] * lr,
       )
-      label.renderOrder = 7
+      label.renderOrder = 12
 
       this._landmarkSprites.push({ dot, label })
       this.group.add(dot)
@@ -405,32 +406,44 @@ export class TopologyNetworkLayer {
 
     const o = this._opacity
 
-    // All street edges — always visible when layer is active
+    // All street edges
     if (this._edgeLines) {
       this._edgeLines.visible = true
       this._edgeLines.material.opacity = o * 0.25
     }
 
-    // Major roads — always visible, prominent
+    // Major roads
     if (this._majorLines) {
       this._majorLines.visible = true
       const pulse = 0.90 + 0.10 * Math.sin(elapsed * 0.0008)
       this._majorLines.material.opacity = o * 0.7 * pulse
     }
 
-    // Secondary roads — always visible
+    // Secondary roads
     if (this._secondaryLines) {
       this._secondaryLines.visible = true
       this._secondaryLines.material.opacity = o * 0.35
     }
 
-    // Labels — always visible
+    // District boundaries
+    if (this._districtLines) {
+      this._districtLines.visible = true
+      this._districtLines.material.opacity = o * 0.4
+    }
+
+    // District labels
+    for (const s of this._districtLabelSprites) {
+      s.visible = true
+      s.material.opacity = o * 0.7
+    }
+
+    // Road labels
     for (const s of this._labelSprites) {
       s.visible = true
       s.material.opacity = o * 0.8
     }
 
-    // Landmarks — always visible
+    // Landmarks
     for (const { dot, label } of this._landmarkSprites) {
       dot.visible = true
       label.visible = true
@@ -445,8 +458,9 @@ export class TopologyNetworkLayer {
 
   dispose() {
     const d = m => { if (m) { m.geometry.dispose(); m.material.dispose() } }
-    d(this._edgeLines); d(this._majorLines); d(this._secondaryLines)
+    d(this._edgeLines); d(this._majorLines); d(this._secondaryLines); d(this._districtLines)
     for (const s of this._labelSprites) { s.material.map?.dispose(); s.material.dispose() }
+    for (const s of this._districtLabelSprites) { s.material.map?.dispose(); s.material.dispose() }
     for (const { dot, label } of this._landmarkSprites) {
       dot.material.map?.dispose(); dot.material.dispose()
       label.material.map?.dispose(); label.material.dispose()

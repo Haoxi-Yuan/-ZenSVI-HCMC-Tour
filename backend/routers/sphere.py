@@ -81,6 +81,15 @@ async def binary_perception_scores():
     )
 
 
+@router.get("/binary/cell_radii")
+async def binary_cell_radii():
+    """Per-cell adaptive radius: float32 (N,) — world-space hex radius per point."""
+    path = _Path("/data2/shared/haoxi/projects/ZenSVI/HCMC_Tour/data/sphere/cell_radii.bin")
+    if not path.exists():
+        raise HTTPException(404, "Cell radii not found.")
+    return FileResponse(str(path), media_type="application/octet-stream", headers=_BINARY_HEADERS)
+
+
 @router.get("/binary/features")
 async def binary_features():
     """Feature matrix: float32 (N, 23)."""
@@ -374,6 +383,69 @@ async def landmarks():
         raise HTTPException(404, "Landmarks not found. Run preprocess_topology.py first.")
     with open(path, encoding="utf-8") as f:
         return _json.load(f)
+
+
+@router.get("/district_boundaries")
+async def district_boundaries():
+    """District boundary polygons projected onto sphere point indices."""
+    path = _TOPOLOGY_DIR / "district_boundaries.json"
+    if not path.exists():
+        raise HTTPException(404, "District boundaries not found. Run preprocess_topology.py first.")
+    with open(path, encoding="utf-8") as f:
+        return _json.load(f)
+
+
+# ──────────────────────────────────────────────
+#  Voronoi tessellation data
+# ──────────────────────────────────────────────
+
+_VORONOI_DIR = _Path("/data2/shared/haoxi/projects/ZenSVI/HCMC_Tour/data/sphere/voronoi")
+
+
+@router.get("/voronoi/metadata")
+async def voronoi_metadata():
+    """Voronoi tessellation metadata: vertex/triangle counts."""
+    path = _VORONOI_DIR / "voronoi_metadata.json"
+    if not path.exists():
+        raise HTTPException(404, "Voronoi data not found. Run preprocess_voronoi.py first.")
+    with open(path) as f:
+        return _json.load(f)
+
+
+@router.get("/binary/voronoi_positions")
+async def binary_voronoi_positions():
+    """Voronoi vertex positions: float32 (V, 3) — unit sphere coords."""
+    path = _VORONOI_DIR / "voronoi_positions.bin"
+    if not path.exists():
+        raise HTTPException(404, "Voronoi positions not found.")
+    return FileResponse(str(path), media_type="application/octet-stream", headers=_BINARY_HEADERS)
+
+
+@router.get("/binary/voronoi_indices")
+async def binary_voronoi_indices():
+    """Voronoi triangle indices: uint32 (T, 3)."""
+    path = _VORONOI_DIR / "voronoi_indices.bin"
+    if not path.exists():
+        raise HTTPException(404, "Voronoi indices not found.")
+    return FileResponse(str(path), media_type="application/octet-stream", headers=_BINARY_HEADERS)
+
+
+@router.get("/binary/voronoi_cell_ids")
+async def binary_voronoi_cell_ids():
+    """Cell ID per vertex: uint32 (V,)."""
+    path = _VORONOI_DIR / "voronoi_cell_ids.bin"
+    if not path.exists():
+        raise HTTPException(404, "Voronoi cell IDs not found.")
+    return FileResponse(str(path), media_type="application/octet-stream", headers=_BINARY_HEADERS)
+
+
+@router.get("/binary/voronoi_local_uvs")
+async def binary_voronoi_local_uvs():
+    """Local UV per vertex: float32 (V, 2) — for atlas texture sampling."""
+    path = _VORONOI_DIR / "voronoi_local_uvs.bin"
+    if not path.exists():
+        raise HTTPException(404, "Voronoi local UVs not found.")
+    return FileResponse(str(path), media_type="application/octet-stream", headers=_BINARY_HEADERS)
 
 
 # ──────────────────────────────────────────────
