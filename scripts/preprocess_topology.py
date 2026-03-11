@@ -1,73 +1,77 @@
 #!/usr/bin/env python3
 """
-preprocess_topology.py — Generate topology data files for sphere road network overlay.
+preprocess_topology.py — Generate road network topology for sphere overlay.
+
+Uses streets_geojson.json LineStrings (real OSM road geometry) to build
+proper street-level edges, NOT the embedding-based adjacency graph.
 
 Outputs (into data/sphere/):
-  - topology_edges.bin        Float32 pairs [idx_a, idx_b, ...] for all adjacency edges
-  - road_network.json         Major roads with actual adjacency edges on the sphere
-  - city_landmarks.json       Important HCMC landmarks mapped to nearest sphere points
+  - topology_edges.bin     Float32 pairs [idx_a, idx_b, ...] — all street edges
+  - road_network.json      Major roads with ordered edge pairs
+  - city_landmarks.json    HCMC landmarks mapped to nearest sphere points
 """
 
 import json
 import struct
 import re
 from pathlib import Path
+from collections import defaultdict
+
 import numpy as np
+from scipy.spatial import cKDTree
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 SPHERE_DIR = DATA_DIR / "sphere"
 
-
-# ---------------------------------------------------------------------------
-# 1. Build topology_edges.bin from adjacency_graph.json
-# ---------------------------------------------------------------------------
-
-def build_topology_edges():
-    print("[1/3] Building topology_edges.bin ...")
-    adj_path = SPHERE_DIR / "adjacency_graph.json"
-    with open(adj_path) as f:
-        adj = json.load(f)
-
-    edges = set()
-    for node_str, neighbors in adj.items():
-        node = int(node_str)
-        for nb in neighbors:
-            a, b = min(node, nb), max(node, nb)
-            edges.add((a, b))
-
-    print(f"       {len(edges):,} undirected edges")
-
-    # Write as flat Float32 pairs: [a0, b0, a1, b1, ...]
-    buf = bytearray(len(edges) * 2 * 4)
-    for i, (a, b) in enumerate(sorted(edges)):
-        struct.pack_into("ff", buf, i * 8, float(a), float(b))
-
-    out_path = SPHERE_DIR / "topology_edges.bin"
-    with open(out_path, "wb") as f:
-        f.write(buf)
-    print(f"       Written {out_path} ({len(buf) / 1024 / 1024:.1f} MB)")
-
-    # Return adjacency dict for reuse
-    return adj
+# Max distance (meters) to snap a GeoJSON coordinate to a sphere point
+SNAP_THRESHOLD_M = 50
+# Approximate meters per degree at HCMC latitude (~10.8°N)
+DEG_TO_M_LAT = 111_320
+DEG_TO_M_LON = 111_320 * np.cos(np.radians(10.8))
 
 
-# ---------------------------------------------------------------------------
-# 2. Build road_network.json — roads as actual adjacency edge pairs
-# ---------------------------------------------------------------------------
-
-def build_road_network(adj):
-    print("[2/3] Building road_network.json ...")
-
-    # Load point metadata to build id→idx lookup
+def load_point_index():
+    """Build KD-tree from point_metadata for fast coord→idx lookup."""
+    print("  Loading point_metadata ...")
     with open(SPHERE_DIR / "point_metadata.json") as f:
-        point_meta = json.load(f)
-    id_to_idx = {p["id"]: p["idx"] for p in point_meta}
+        meta = json.load(f)
 
-    # Load streets data
-    with open(DATA_DIR / "streets.json") as f:
-        streets = json.load(f)
+    n = len(meta)
+    coords = np.empty((n, 2), dtype=np.float64)
+    for p in meta:
+        i = p["idx"]
+        # Store as (lat_m, lon_m) in meters for distance thresholding
+        coords[i, 0] = p["lat"] * DEG_TO_M_LAT
+        coords[i, 1] = p["lon"] * DEG_TO_M_LON
 
-    # Known major road base names in HCMC
+    tree = cKDTree(coords)
+    print(f"  KD-tree built: {n:,} points")
+    return tree, coords, n
+
+
+def snap_coord_to_idx(tree, lon, lat):
+    """Snap a (lon, lat) coordinate to the nearest point index. Returns -1 if too far."""
+    query = [lat * DEG_TO_M_LAT, lon * DEG_TO_M_LON]
+    dist, idx = tree.query(query)
+    if dist > SNAP_THRESHOLD_M:
+        return -1
+    return int(idx)
+
+
+# ---------------------------------------------------------------------------
+# 1 + 2. Build all street edges + road_network.json from GeoJSON LineStrings
+# ---------------------------------------------------------------------------
+
+def build_street_edges_and_roads(tree):
+    print("[1/2] Building street edges from GeoJSON LineStrings ...")
+
+    with open(DATA_DIR / "streets_geojson.json") as f:
+        geojson = json.load(f)
+
+    features = geojson["features"]
+    print(f"  {len(features):,} LineString features")
+
+    # Known major road base names
     KNOWN_MAJOR = {
         "Võ Văn Kiệt", "Nguyễn Văn Linh", "Cách Mạng Tháng 8",
         "Trần Hưng Đạo", "Lê Lợi", "Đồng Khởi", "Nam Kỳ Khởi Nghĩa",
@@ -85,108 +89,111 @@ def build_road_network(adj):
         "Nguyễn Tất Thành", "Bùi Viện",
     }
 
-    # Aggregate street segments by base name (strip #N suffix)
-    road_groups = {}
-    for street_name, street_data in streets.items():
-        base_name = re.sub(r"\s*#\d+$", "", street_name)
-        if base_name not in road_groups:
-            road_groups[base_name] = {
-                "total_points": 0,
-                "point_ids": [],
-                "center_lats": [],
-                "center_lons": [],
-            }
-        rg = road_groups[base_name]
-        rg["total_points"] += street_data.get("total_points", 0)
-        rg["center_lats"].append(street_data.get("center_lat", 0))
-        rg["center_lons"].append(street_data.get("center_lon", 0))
-        for seg in street_data.get("segments", []):
-            for pid in seg.get("points", []):
-                rg["point_ids"].append(pid)
+    # Collect edges per road name + all edges globally
+    all_edges = set()
+    road_edges = defaultdict(set)       # base_name → set of (a, b) edge tuples
+    road_points = defaultdict(set)      # base_name → set of point indices
+    snapped = 0
+    missed = 0
 
-    # Select roads: known major + top by point count
-    roads_by_points = sorted(road_groups.items(), key=lambda x: -x[1]["total_points"])
-    selected_names = set()
-    for name in KNOWN_MAJOR:
-        if name in road_groups:
-            selected_names.add(name)
-    for name, _ in roads_by_points:
-        if len(selected_names) >= 120:
-            break
-        selected_names.add(name)
+    for feat in features:
+        coords = feat.get("geometry", {}).get("coordinates", [])
+        name = feat.get("properties", {}).get("name", "")
+        base_name = re.sub(r"\s*#\d+$", "", name) if name else ""
 
-    # Build adjacency set for fast lookup
-    adj_set = set()
-    for node_str, neighbors in adj.items():
-        node = int(node_str)
-        for nb in neighbors:
-            adj_set.add((min(node, nb), max(node, nb)))
-
-    # Build output: for each road, find actual adjacency edges between its points
-    road_network = []
-    total_road_edges = 0
-
-    for name in sorted(selected_names):
-        rg = road_groups[name]
-
-        # Map point IDs to sphere indices (deduplicated)
-        point_set = set()
-        for pid in rg["point_ids"]:
-            idx = id_to_idx.get(pid)
-            if idx is not None:
-                point_set.add(idx)
-
-        if len(point_set) < 2:
+        if len(coords) < 2:
             continue
 
-        # Find all adjacency edges where BOTH endpoints belong to this road
-        road_edges = []
-        point_list = sorted(point_set)
-        for i, a in enumerate(point_list):
-            for b in point_list[i + 1:]:
-                if (a, b) in adj_set:
-                    road_edges.append([a, b])
+        # Snap each coordinate to nearest point index
+        idx_seq = []
+        for lon, lat in coords:
+            idx = snap_coord_to_idx(tree, lon, lat)
+            if idx >= 0:
+                snapped += 1
+                # Deduplicate consecutive same-index
+                if not idx_seq or idx_seq[-1] != idx:
+                    idx_seq.append(idx)
+            else:
+                missed += 1
 
-        if not road_edges:
+        # Build edges from consecutive pairs
+        for i in range(len(idx_seq) - 1):
+            a, b = idx_seq[i], idx_seq[i + 1]
+            if a == b:
+                continue
+            edge = (min(a, b), max(a, b))
+            all_edges.add(edge)
+            if base_name:
+                road_edges[base_name].add(edge)
+                road_points[base_name].add(a)
+                road_points[base_name].add(b)
+
+    total_snap = snapped + missed
+    print(f"  Snapped: {snapped:,}/{total_snap:,} ({100*snapped/total_snap:.1f}%)")
+    print(f"  Total unique street edges: {len(all_edges):,}")
+
+    # ─── Write topology_edges.bin (ALL street edges) ─────────
+    sorted_edges = sorted(all_edges)
+    buf = bytearray(len(sorted_edges) * 2 * 4)
+    for i, (a, b) in enumerate(sorted_edges):
+        struct.pack_into("ff", buf, i * 8, float(a), float(b))
+
+    out_path = SPHERE_DIR / "topology_edges.bin"
+    with open(out_path, "wb") as f:
+        f.write(buf)
+    print(f"  Written {out_path} ({len(buf)/1024/1024:.1f} MB)")
+
+    # ─── Build road_network.json ─────────────────────────────
+    # Select major roads + top by edge count
+    roads_by_edges = sorted(road_edges.items(), key=lambda x: -len(x[1]))
+    selected = set()
+    for name in KNOWN_MAJOR:
+        if name in road_edges:
+            selected.add(name)
+    for name, _ in roads_by_edges:
+        if len(selected) >= 120:
+            break
+        selected.add(name)
+
+    road_network = []
+    for name in sorted(selected):
+        edges = road_edges[name]
+        points = road_points[name]
+        if len(edges) < 2:
             continue
 
         is_major = name in KNOWN_MAJOR
-        center_lat = sum(rg["center_lats"]) / len(rg["center_lats"]) if rg["center_lats"] else 0
-        center_lon = sum(rg["center_lons"]) / len(rg["center_lons"]) if rg["center_lons"] else 0
 
-        # Find a label anchor point: pick the point closest to the road's geographic center
-        # by using the embedding positions on the unit sphere
-        label_idx = point_list[len(point_list) // 2]  # fallback: middle of sorted list
+        # Pick label anchor: median point by index (rough center of road on sphere)
+        sorted_pts = sorted(points)
+        label_idx = sorted_pts[len(sorted_pts) // 2]
 
         road_network.append({
             "name": name,
-            "edges": road_edges,         # actual adjacency edge pairs
-            "point_count": len(point_set),
+            "edges": [list(e) for e in sorted(edges)],
+            "point_count": len(points),
             "is_major": is_major,
             "label_idx": label_idx,
-            "center_lat": round(center_lat, 6),
-            "center_lon": round(center_lon, 6),
         })
-        total_road_edges += len(road_edges)
 
-    # Sort: major roads first, then by edge count
     road_network.sort(key=lambda r: (not r["is_major"], -len(r["edges"])))
 
     out_path = SPHERE_DIR / "road_network.json"
     with open(out_path, "w", encoding="utf-8") as f:
-        json.dump(road_network, f, ensure_ascii=False, indent=None, separators=(",", ":"))
+        json.dump(road_network, f, ensure_ascii=False, separators=(",", ":"))
+
     major_count = sum(1 for r in road_network if r["is_major"])
-    print(f"       {len(road_network)} roads ({major_count} major), {total_road_edges:,} road edges")
-    print(f"       Written {out_path}")
-    return road_network
+    total_road_edges = sum(len(r["edges"]) for r in road_network)
+    print(f"  {len(road_network)} roads ({major_count} major), {total_road_edges:,} road edges")
+    print(f"  Written {out_path}")
 
 
 # ---------------------------------------------------------------------------
-# 3. Build city_landmarks.json — map landmarks to nearest sphere points
+# 3. City landmarks
 # ---------------------------------------------------------------------------
 
 def build_landmarks():
-    print("[3/3] Building city_landmarks.json ...")
+    print("[2/2] Building city_landmarks.json ...")
 
     with open(SPHERE_DIR / "point_metadata.json") as f:
         point_meta = json.load(f)
@@ -241,16 +248,15 @@ def build_landmarks():
     out_path = SPHERE_DIR / "city_landmarks.json"
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(result, f, ensure_ascii=False, indent=2)
-    print(f"       {len(result)} landmarks, written {out_path}")
-    return result
+    print(f"  {len(result)} landmarks, written {out_path}")
 
 
 # ---------------------------------------------------------------------------
 
 def main():
     print("=== preprocess_topology.py ===")
-    adj = build_topology_edges()
-    build_road_network(adj)
+    tree, coords, n = load_point_index()
+    build_street_edges_and_roads(tree)
     build_landmarks()
     print("Done.")
 

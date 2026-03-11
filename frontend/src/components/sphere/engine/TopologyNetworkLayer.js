@@ -1,17 +1,18 @@
 /**
- * TopologyNetworkLayer — Road network topology mapped onto the sphere surface.
+ * TopologyNetworkLayer — Real road network topology on the sphere surface.
  *
- * Renders adjacency edges as actual road paths on the sphere, not arbitrary
- * connections. Each road's edges come from the adjacency graph filtered to
- * points belonging to that road.
+ * Edges come from GeoJSON LineString coordinate sequences (OSM road geometry),
+ * NOT from the embedding-based adjacency graph. Each edge pair represents
+ * consecutive points along an actual street.
+ *
+ * All lines are drawn as geodesic arcs (slerp interpolation) that hug the
+ * sphere surface instead of cutting through the interior.
  *
  * Visual elements:
- *   1. All-edge mesh: full adjacency graph as faint lines
- *   2. Major road edges: gold/bright lines using real adjacency pairs
- *   3. Micro-labels: tiny map-style annotations for road names
+ *   1. All street edges: faint lines forming the full road mesh
+ *   2. Major road edges: brighter gold lines for named arterials
+ *   3. Micro-labels: tiny map-style text for major road names
  *   4. Landmark dots: small glowing points with minimal text
- *
- * LOD by camera distance. Visible in both REST orbit and core-inside views.
  */
 
 import * as THREE from 'three'
@@ -19,25 +20,87 @@ import { SPHERE_RADIUS } from '../../../utils/sphereConstants'
 
 const API = '/api/sphere'
 
-// Radii — roads sit just above sphere surface
-const SURFACE_R = SPHERE_RADIUS * 1.002
-const MAJOR_R = SPHERE_RADIUS * 1.004
-const LABEL_R = SPHERE_RADIUS * 1.015
-const LANDMARK_R = SPHERE_RADIUS * 1.012
+// Radii — roads sit just above sphere faces
+const SURFACE_R = SPHERE_RADIUS * 1.003
+const MAJOR_R = SPHERE_RADIUS * 1.005
+const LABEL_R = SPHERE_RADIUS * 1.018
+const LANDMARK_R = SPHERE_RADIUS * 1.014
+
+// Geodesic arc interpolation steps per edge
+const ARC_STEPS = 5
 
 // Colors
 const EDGE_COLOR = new THREE.Color(0.30, 0.30, 0.34)
 const MAJOR_COLOR = new THREE.Color(0.85, 0.65, 0.30)
-const SECONDARY_COLOR = new THREE.Color(0.55, 0.52, 0.48)
-const LABEL_TEXT_COLOR = { r: 200, g: 180, b: 145 }       // warm muted gold
-const LANDMARK_TEXT_COLOR = { r: 230, g: 140, b: 100 }     // warm orange
+const SECONDARY_COLOR = new THREE.Color(0.50, 0.48, 0.44)
+const LABEL_TEXT = { r: 200, g: 180, b: 145 }
+const LANDMARK_TEXT = { r: 230, g: 140, b: 100 }
 
 // LOD thresholds (camera distance from origin)
 const LOD_MID = 16
 const LOD_NEAR = 8
 
-// Subsample for all-edges (performance)
-const MAX_VISIBLE_EDGES = 200000
+// Subsample all-edges for performance
+const MAX_ALL_EDGES = 100000
+
+// Reusable vectors for slerp
+const _vA = new THREE.Vector3()
+const _vB = new THREE.Vector3()
+const _vT = new THREE.Vector3()
+
+/**
+ * Spherical linear interpolation between two unit vectors.
+ * Result is written to `out` and normalized, then scaled by `radius`.
+ */
+function slerpToSurface(vA, vB, t, radius, out) {
+  const dot = Math.max(-1, Math.min(1, vA.dot(vB)))
+  // For nearly identical directions, lerp is fine
+  if (Math.abs(dot) > 0.9999) {
+    out.lerpVectors(vA, vB, t).normalize().multiplyScalar(radius)
+    return
+  }
+  const omega = Math.acos(dot)
+  const sinOmega = Math.sin(omega)
+  const a = Math.sin((1 - t) * omega) / sinOmega
+  const b = Math.sin(t * omega) / sinOmega
+  out.set(
+    vA.x * a + vB.x * b,
+    vA.y * a + vB.y * b,
+    vA.z * a + vB.z * b,
+  ).multiplyScalar(radius)
+}
+
+/**
+ * Build a geodesic arc (array of 3D positions) between two point indices.
+ * Returns flat array [x0,y0,z0, x1,y1,z1, ...] with ARC_STEPS+1 points.
+ */
+function arcPositions(positions, idxA, idxB, radius, steps) {
+  _vA.set(positions[idxA * 3], positions[idxA * 3 + 1], positions[idxA * 3 + 2])
+  _vB.set(positions[idxB * 3], positions[idxB * 3 + 1], positions[idxB * 3 + 2])
+
+  const result = []
+  for (let i = 0; i <= steps; i++) {
+    slerpToSurface(_vA, _vB, i / steps, radius, _vT)
+    result.push(_vT.x, _vT.y, _vT.z)
+  }
+  return result
+}
+
+/**
+ * Push arc line-segment pairs into position/color arrays.
+ * Each arc of N steps produces N line segments (2 vertices each).
+ */
+function pushArc(positions, idxA, idxB, radius, steps, posArr, colArr, color) {
+  const arc = arcPositions(positions, idxA, idxB, radius, steps)
+  for (let i = 0; i < steps; i++) {
+    const j = i * 3
+    const k = (i + 1) * 3
+    posArr.push(arc[j], arc[j + 1], arc[j + 2])
+    posArr.push(arc[k], arc[k + 1], arc[k + 2])
+    colArr.push(color.r, color.g, color.b, color.r, color.g, color.b)
+  }
+}
+
 
 export class TopologyNetworkLayer {
   constructor(positions) {
@@ -54,7 +117,7 @@ export class TopologyNetworkLayer {
     this._loaded = false
     this._opacity = 0
     this._targetOpacity = 0
-    this._forceVisible = false  // for core-inside view
+    this._forceVisible = false
   }
 
   init(scene, engine) {
@@ -100,36 +163,31 @@ export class TopologyNetworkLayer {
     }
   }
 
-  // ─── All adjacency edges (thin background mesh) ───────────────
+  // ─── All street edges (thin geodesic arcs) ────────────────────
 
   _buildAllEdges() {
     const data = this._edgesData
     const totalEdges = data.length / 2
-    const step = totalEdges > MAX_VISIBLE_EDGES
-      ? Math.ceil(totalEdges / MAX_VISIBLE_EDGES)
+    const step = totalEdges > MAX_ALL_EDGES
+      ? Math.ceil(totalEdges / MAX_ALL_EDGES)
       : 1
-    const edgeCount = Math.ceil(totalEdges / step)
 
-    const positions = new Float32Array(edgeCount * 6)
-    let vi = 0
+    const posArr = []
+    const colArr = []
 
     for (let i = 0; i < totalEdges; i += step) {
       const idxA = Math.round(data[i * 2])
       const idxB = Math.round(data[i * 2 + 1])
-
-      positions[vi++] = this.positions[idxA * 3] * SURFACE_R
-      positions[vi++] = this.positions[idxA * 3 + 1] * SURFACE_R
-      positions[vi++] = this.positions[idxA * 3 + 2] * SURFACE_R
-      positions[vi++] = this.positions[idxB * 3] * SURFACE_R
-      positions[vi++] = this.positions[idxB * 3 + 1] * SURFACE_R
-      positions[vi++] = this.positions[idxB * 3 + 2] * SURFACE_R
+      if (idxA * 3 + 2 >= this.positions.length || idxB * 3 + 2 >= this.positions.length) continue
+      pushArc(this.positions, idxA, idxB, SURFACE_R, ARC_STEPS, posArr, colArr, EDGE_COLOR)
     }
 
-    const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions.subarray(0, vi), 3))
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(posArr, 3))
+    geo.setAttribute('color', new THREE.Float32BufferAttribute(colArr, 3))
 
-    this._edgeLines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({
-      color: EDGE_COLOR,
+    this._edgeLines = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({
+      vertexColors: true,
       transparent: true,
       opacity: 0,
       depthWrite: false,
@@ -140,42 +198,29 @@ export class TopologyNetworkLayer {
     this.group.add(this._edgeLines)
   }
 
-  // ─── Road edges from adjacency graph ──────────────────────────
+  // ─── Road edges (geodesic arcs with color coding) ─────────────
 
   _buildRoadEdges() {
     if (!this._roadNetwork?.length) return
 
-    const majorPos = []
-    const majorCol = []
-    const secPos = []
-    const secCol = []
+    const majorPos = [], majorCol = []
+    const secPos = [], secCol = []
 
     for (const road of this._roadNetwork) {
-      const edges = road.edges
-      if (!edges?.length) continue
+      if (!road.edges?.length) continue
 
       const isMajor = road.is_major
       const color = isMajor ? MAJOR_COLOR : SECONDARY_COLOR
-      const r = isMajor ? MAJOR_R : SURFACE_R * 1.001
+      const r = isMajor ? MAJOR_R : SURFACE_R * 1.002
       const posArr = isMajor ? majorPos : secPos
       const colArr = isMajor ? majorCol : secCol
 
-      for (const [idxA, idxB] of edges) {
+      for (const [idxA, idxB] of road.edges) {
         if (idxA * 3 + 2 >= this.positions.length || idxB * 3 + 2 >= this.positions.length) continue
-
-        posArr.push(
-          this.positions[idxA * 3] * r,
-          this.positions[idxA * 3 + 1] * r,
-          this.positions[idxA * 3 + 2] * r,
-          this.positions[idxB * 3] * r,
-          this.positions[idxB * 3 + 1] * r,
-          this.positions[idxB * 3 + 2] * r,
-        )
-        colArr.push(color.r, color.g, color.b, color.r, color.g, color.b)
+        pushArc(this.positions, idxA, idxB, r, ARC_STEPS, posArr, colArr, color)
       }
     }
 
-    // Major road lines
     if (majorPos.length) {
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.Float32BufferAttribute(majorPos, 3))
@@ -191,7 +236,6 @@ export class TopologyNetworkLayer {
       this.group.add(this._majorLines)
     }
 
-    // Secondary road lines
     if (secPos.length) {
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.Float32BufferAttribute(secPos, 3))
@@ -208,18 +252,17 @@ export class TopologyNetworkLayer {
     }
   }
 
-  // ─── Micro-labels for road names ──────────────────────────────
+  // ─── Micro-labels ─────────────────────────────────────────────
 
   _buildRoadLabels() {
     if (!this._roadNetwork?.length) return
-
     const majorRoads = this._roadNetwork.filter(r => r.is_major)
 
     for (const road of majorRoads) {
       const idx = road.label_idx
       if (idx == null || idx * 3 + 2 >= this.positions.length) continue
 
-      const sprite = this._microLabel(road.name, LABEL_TEXT_COLOR, 0.28)
+      const sprite = this._microLabel(road.name, LABEL_TEXT, 0.28)
       sprite.position.set(
         this.positions[idx * 3] * LABEL_R,
         this.positions[idx * 3 + 1] * LABEL_R,
@@ -231,7 +274,7 @@ export class TopologyNetworkLayer {
     }
   }
 
-  // ─── Landmark micro-dots + labels ─────────────────────────────
+  // ─── Landmark micro-dots ──────────────────────────────────────
 
   _buildLandmarks() {
     if (!this._landmarks?.length) return
@@ -240,7 +283,6 @@ export class TopologyNetworkLayer {
       const idx = lm.nearest_point_idx
       if (idx * 3 + 2 >= this.positions.length) continue
 
-      // Tiny dot
       const dot = this._microDot(lm.type)
       dot.position.set(
         this.positions[idx * 3] * LANDMARK_R,
@@ -249,12 +291,7 @@ export class TopologyNetworkLayer {
       )
       dot.renderOrder = 6
 
-      // Micro name label
-      const label = this._microLabel(
-        lm.name_vi || lm.name,
-        LANDMARK_TEXT_COLOR,
-        0.22,
-      )
+      const label = this._microLabel(lm.name_vi || lm.name, LANDMARK_TEXT, 0.22)
       const lr = LANDMARK_R * 1.015
       label.position.set(
         this.positions[idx * 3] * lr,
@@ -269,52 +306,41 @@ export class TopologyNetworkLayer {
     }
   }
 
-  // ─── Sprite factories: map-style micro annotations ────────────
+  // ─── Sprite factories ────────────────────────────────────────
 
   _microLabel(text, color, scale) {
     const canvas = document.createElement('canvas')
     const ctx = canvas.getContext('2d')
     const fontSize = 28
-    const padding = 4
+    const pad = 4
 
-    ctx.font = `500 ${fontSize}px "Inter", "Segoe UI", sans-serif`
+    ctx.font = `500 ${fontSize}px "Inter","Segoe UI",sans-serif`
     const tw = ctx.measureText(text).width
+    canvas.width = Math.ceil(tw + pad * 2)
+    canvas.height = Math.ceil(fontSize * 1.3 + pad)
 
-    canvas.width = Math.ceil(tw + padding * 2)
-    canvas.height = Math.ceil(fontSize * 1.3 + padding)
-
-    // No background — just text with slight shadow for readability
     ctx.clearRect(0, 0, canvas.width, canvas.height)
-    ctx.font = `500 ${fontSize}px "Inter", "Segoe UI", sans-serif`
-
-    // Subtle shadow
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.6)'
+    ctx.font = `500 ${fontSize}px "Inter","Segoe UI",sans-serif`
+    ctx.shadowColor = 'rgba(0,0,0,0.6)'
     ctx.shadowBlur = 3
     ctx.shadowOffsetX = 1
     ctx.shadowOffsetY = 1
-
-    ctx.fillStyle = `rgb(${color.r}, ${color.g}, ${color.b})`
+    ctx.fillStyle = `rgb(${color.r},${color.g},${color.b})`
     ctx.textAlign = 'center'
     ctx.textBaseline = 'middle'
     ctx.fillText(text, canvas.width / 2, canvas.height / 2)
 
-    const texture = new THREE.CanvasTexture(canvas)
-    texture.minFilter = THREE.LinearFilter
-    texture.magFilter = THREE.LinearFilter
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.minFilter = THREE.LinearFilter
+    tex.magFilter = THREE.LinearFilter
 
     const mat = new THREE.SpriteMaterial({
-      map: texture,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      depthTest: true,
-      sizeAttenuation: true,
+      map: tex, transparent: true, opacity: 0,
+      depthWrite: false, depthTest: true, sizeAttenuation: true,
     })
-
     const sprite = new THREE.Sprite(mat)
-    const aspect = canvas.width / canvas.height
-    sprite.scale.set(scale * aspect, scale, 1)
-    sprite.userData = { canvas, texture }
+    sprite.scale.set(scale * (canvas.width / canvas.height), scale, 1)
+    sprite.userData = { canvas, tex }
     return sprite
   }
 
@@ -325,66 +351,41 @@ export class TopologyNetworkLayer {
     canvas.height = size
     const ctx = canvas.getContext('2d')
     const cx = size / 2
+    const colors = { landmark: [232,140,90], transport: [130,170,210], park: [80,180,110], district: [190,165,100] }
+    const [r, g, b] = colors[type] || colors.landmark
 
-    const colorMap = {
-      landmark: [232, 140, 90],
-      transport: [130, 170, 210],
-      park: [80, 180, 110],
-      district: [190, 165, 100],
-    }
-    const [r, g, b] = colorMap[type] || colorMap.landmark
-
-    // Soft glow
     const grad = ctx.createRadialGradient(cx, cx, 0, cx, cx, size / 2)
-    grad.addColorStop(0, `rgba(${r}, ${g}, ${b}, 0.9)`)
-    grad.addColorStop(0.35, `rgba(${r}, ${g}, ${b}, 0.4)`)
-    grad.addColorStop(1, `rgba(${r}, ${g}, ${b}, 0)`)
+    grad.addColorStop(0, `rgba(${r},${g},${b},0.9)`)
+    grad.addColorStop(0.35, `rgba(${r},${g},${b},0.4)`)
+    grad.addColorStop(1, `rgba(${r},${g},${b},0)`)
     ctx.fillStyle = grad
     ctx.fillRect(0, 0, size, size)
 
-    // Tiny center dot
     ctx.beginPath()
     ctx.arc(cx, cx, 3, 0, Math.PI * 2)
-    ctx.fillStyle = `rgb(${r}, ${g}, ${b})`
+    ctx.fillStyle = `rgb(${r},${g},${b})`
     ctx.fill()
 
-    const texture = new THREE.CanvasTexture(canvas)
-    texture.minFilter = THREE.LinearFilter
-
+    const tex = new THREE.CanvasTexture(canvas)
+    tex.minFilter = THREE.LinearFilter
     const mat = new THREE.SpriteMaterial({
-      map: texture,
-      transparent: true,
-      opacity: 0,
-      depthWrite: false,
-      depthTest: false,
-      sizeAttenuation: true,
+      map: tex, transparent: true, opacity: 0,
+      depthWrite: false, depthTest: false, sizeAttenuation: true,
     })
-
     const sprite = new THREE.Sprite(mat)
     sprite.scale.set(0.25, 0.25, 1)
-    sprite.userData = { canvas, texture }
+    sprite.userData = { canvas, tex }
     return sprite
   }
 
-  // ─── Visibility control ───────────────────────────────────────
+  // ─── Visibility ───────────────────────────────────────────────
 
-  show() {
-    this._targetOpacity = 1
-    this.group.visible = true
-  }
+  show() { this._targetOpacity = 1; this.group.visible = true }
+  hide() { this._targetOpacity = 0; this._forceVisible = false }
 
-  hide() {
-    this._targetOpacity = 0
-    this._forceVisible = false
-  }
-
-  /** Keep visible in core-inside view (REST phase interior). */
   setCoreInsideVisible(enabled) {
     this._forceVisible = !!enabled
-    if (enabled) {
-      this._targetOpacity = 1
-      this.group.visible = true
-    }
+    if (enabled) { this._targetOpacity = 1; this.group.visible = true }
   }
 
   // ─── Per-frame update ─────────────────────────────────────────
@@ -392,13 +393,11 @@ export class TopologyNetworkLayer {
   update(dt, elapsed) {
     if (!this._loaded) return
 
-    // Fade
     const speed = 2.5
-    if (this._opacity < this._targetOpacity) {
+    if (this._opacity < this._targetOpacity)
       this._opacity = Math.min(this._targetOpacity, this._opacity + dt * speed)
-    } else if (this._opacity > this._targetOpacity) {
+    else if (this._opacity > this._targetOpacity)
       this._opacity = Math.max(this._targetOpacity, this._opacity - dt * speed)
-    }
 
     if (this._opacity <= 0.001 && this._targetOpacity <= 0) {
       this.group.visible = false
@@ -406,48 +405,40 @@ export class TopologyNetworkLayer {
     }
 
     const camDist = this.engine.camera.position.length()
-
-    // In core-inside mode, camera is near origin — show everything
     const insideCore = this._forceVisible && camDist < 6
     let lod
-    if (insideCore) {
-      lod = 'core'  // inside the sphere, show major roads + labels
-    } else if (camDist < LOD_NEAR) {
-      lod = 'hidden'
-    } else if (camDist < LOD_MID) {
-      lod = 'mid'
-    } else {
-      lod = 'far'
-    }
+    if (insideCore) lod = 'core'
+    else if (camDist < LOD_NEAR) lod = 'hidden'
+    else if (camDist < LOD_MID) lod = 'mid'
+    else lod = 'far'
 
     const o = this._opacity
 
-    // All-edges: only at mid zoom
+    // All street edges
     if (this._edgeLines) {
       const show = lod === 'mid'
       this._edgeLines.visible = show
       if (show) this._edgeLines.material.opacity = o * 0.10
     }
 
-    // Major road edges: visible at far, mid, and core-inside
+    // Major roads
     if (this._majorLines) {
       const show = lod !== 'hidden'
       this._majorLines.visible = show
       if (show) {
         const pulse = 0.88 + 0.12 * Math.sin(elapsed * 0.0008)
-        const base = lod === 'core' ? 0.35 : 0.45
-        this._majorLines.material.opacity = o * base * pulse
+        this._majorLines.material.opacity = o * (lod === 'core' ? 0.35 : 0.45) * pulse
       }
     }
 
-    // Secondary road edges: at mid zoom only
+    // Secondary roads
     if (this._secondaryLines) {
       const show = lod === 'mid'
       this._secondaryLines.visible = show
       if (show) this._secondaryLines.material.opacity = o * 0.18
     }
 
-    // Road labels
+    // Labels
     const showLabels = lod === 'far' || lod === 'core'
     const labelOp = o * (lod === 'core' ? 0.5 : 0.7)
     for (const s of this._labelSprites) {
@@ -455,7 +446,7 @@ export class TopologyNetworkLayer {
       if (showLabels) s.material.opacity = labelOp
     }
 
-    // Landmark dots + labels
+    // Landmarks
     const showLm = lod !== 'hidden' && lod !== 'mid'
     const lmOp = o * (lod === 'core' ? 0.45 : 0.65)
     for (const { dot, label } of this._landmarkSprites) {
@@ -467,21 +458,15 @@ export class TopologyNetworkLayer {
       }
     }
 
-    if (this._opacity <= 0.001) {
-      this.group.visible = false
-    }
+    if (this._opacity <= 0.001) this.group.visible = false
   }
 
   // ─── Cleanup ──────────────────────────────────────────────────
 
   dispose() {
-    const disposeMesh = (m) => { if (m) { m.geometry.dispose(); m.material.dispose() } }
-    disposeMesh(this._edgeLines)
-    disposeMesh(this._majorLines)
-    disposeMesh(this._secondaryLines)
-    for (const s of this._labelSprites) {
-      s.material.map?.dispose(); s.material.dispose()
-    }
+    const d = m => { if (m) { m.geometry.dispose(); m.material.dispose() } }
+    d(this._edgeLines); d(this._majorLines); d(this._secondaryLines)
+    for (const s of this._labelSprites) { s.material.map?.dispose(); s.material.dispose() }
     for (const { dot, label } of this._landmarkSprites) {
       dot.material.map?.dispose(); dot.material.dispose()
       label.material.map?.dispose(); label.material.dispose()
