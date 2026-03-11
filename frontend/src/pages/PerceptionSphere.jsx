@@ -346,10 +346,12 @@ function SphereContent() {
     if (inRest) {
       refs.cameraCtrl.setRestViewMode(restViewMode, true)
       refs.geodesic.setInteriorViewMode(restViewMode === 'core')
+      if (refs.topology) refs.topology.setCoreInsideVisible(restViewMode === 'core')
       return
     }
     refs.cameraCtrl.setRestViewMode('orbit', false)
     refs.geodesic.setInteriorViewMode(false)
+    if (refs.topology) refs.topology.setCoreInsideVisible(false)
   }, [state.phase, restViewMode]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // When core-inside view is active, keep looking toward current relation center.
