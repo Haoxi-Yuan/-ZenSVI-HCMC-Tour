@@ -25,10 +25,10 @@ const MAX_ALL_EDGES = 100000
 const EDGE_COLOR = new THREE.Color(0.30, 0.30, 0.34)
 const MAJOR_COLOR = new THREE.Color(0.85, 0.65, 0.30)
 const SECONDARY_COLOR = new THREE.Color(0.50, 0.48, 0.44)
-const DISTRICT_COLOR = new THREE.Color(0.45, 0.70, 0.85)
+const DISTRICT_COLOR = new THREE.Color(0.42, 0.39, 0.35)  // #6B6358 warm muted
 const LABEL_TEXT = { r: 200, g: 180, b: 145 }
 const LANDMARK_TEXT = { r: 230, g: 140, b: 100 }
-const DISTRICT_LABEL = { r: 120, g: 180, b: 220 }
+const DISTRICT_LABEL = { r: 168, g: 159, b: 145 }  // #A89F91 text-secondary
 
 const _vA = new THREE.Vector3()
 const _vB = new THREE.Vector3()
