@@ -132,7 +132,7 @@ function SphereContent() {
     const refs = engineRef.current
     if (!refs) return
 
-    const { geodesic, cameraCtrl, streetView, avatar, synapse3D, volunteerAnchors } = refs
+    const { geodesic, cameraCtrl, streetView, avatar, synapse3D, volunteerAnchors, topology } = refs
     const idx = state.selectedIdx
     const facePos = geodesic.getFacePosition(idx)
     const faceNormal = geodesic.getFaceNormal(idx)
@@ -144,6 +144,7 @@ function SphereContent() {
     geodesic.setShellVisible(false)
     geodesic.setSphereOpacity(0.0)
     if (volunteerAnchors) volunteerAnchors.hide()
+    if (topology) topology.hide()
     // Disable hover during flight
     geodesic.callbacks.onPointClick = null
 
@@ -170,7 +171,7 @@ function SphereContent() {
   const handleExit = useCallback(() => {
     const refs = engineRef.current
     if (!refs) return
-    const { geodesic, cameraCtrl, streetView, avatar, synapse3D, volunteerAnchors } = refs
+    const { geodesic, cameraCtrl, streetView, avatar, synapse3D, volunteerAnchors, topology } = refs
 
     // Hide street view panorama, avatar, and 3D synapse
     if (streetView) streetView.hide()
@@ -183,8 +184,9 @@ function SphereContent() {
       geodesic.setHighlightedFaces(null)
       // Re-enable hover click
       geodesic.callbacks.onPointClick = (idx) => dispatch({ type: 'CLICK_FACE', idx })
-      // Restore volunteer anchors
+      // Restore volunteer anchors and topology
       if (volunteerAnchors) volunteerAnchors.show()
+      if (topology) topology.show()
     })
     dispatch({ type: 'EXIT_TO_REST' })
   }, [dispatch, engineRef])
@@ -416,13 +418,14 @@ function SphereContent() {
     const refs = engineRef.current
     if (!refs) return
 
-    const { geodesic, cameraCtrl, streetView, avatar, bloomAnim, synapse3D, relationLinks } = refs
+    const { geodesic, cameraCtrl, streetView, avatar, bloomAnim, synapse3D, relationLinks, topology } = refs
 
-    // Hide street view, avatar, and synapse during bloom
+    // Hide street view, avatar, synapse, and topology during bloom
     if (streetView) streetView.hide()
     if (avatar) avatar.hide()
     if (synapse3D) synapse3D.hide()
     if (relationLinks) relationLinks.hide()
+    if (topology) topology.hide()
 
     // Fetch geographic details for all similar faces (batch with concurrency limit)
     const fetchDetails = async () => {

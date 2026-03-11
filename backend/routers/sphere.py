@@ -338,6 +338,45 @@ async def volunteers():
 
 
 # ──────────────────────────────────────────────
+#  Topology / Road network
+# ──────────────────────────────────────────────
+
+_TOPOLOGY_DIR = _Path("/data2/shared/haoxi/projects/ZenSVI/HCMC_Tour/data/sphere")
+
+
+@router.get("/binary/topology_edges")
+async def binary_topology_edges():
+    """Adjacency edges: float32 pairs [idx_a, idx_b, ...]."""
+    path = _TOPOLOGY_DIR / "topology_edges.bin"
+    if not path.exists():
+        raise HTTPException(404, "Topology edges not found. Run preprocess_topology.py first.")
+    return FileResponse(
+        str(path), media_type="application/octet-stream",
+        headers=_BINARY_HEADERS,
+    )
+
+
+@router.get("/road_network")
+async def road_network():
+    """Major roads with point indices for sphere overlay."""
+    path = _TOPOLOGY_DIR / "road_network.json"
+    if not path.exists():
+        raise HTTPException(404, "Road network not found. Run preprocess_topology.py first.")
+    with open(path, encoding="utf-8") as f:
+        return _json.load(f)
+
+
+@router.get("/landmarks")
+async def landmarks():
+    """City landmarks mapped to nearest sphere points."""
+    path = _TOPOLOGY_DIR / "city_landmarks.json"
+    if not path.exists():
+        raise HTTPException(404, "Landmarks not found. Run preprocess_topology.py first.")
+    with open(path, encoding="utf-8") as f:
+        return _json.load(f)
+
+
+# ──────────────────────────────────────────────
 #  Static file serving
 # ──────────────────────────────────────────────
 

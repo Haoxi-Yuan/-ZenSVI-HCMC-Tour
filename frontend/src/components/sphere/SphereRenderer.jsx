@@ -15,6 +15,7 @@ import { Synapse3DLayer } from './engine/Synapse3DLayer'
 import { NeighborProjection } from './engine/NeighborProjection'
 import { VolunteerAnchorsLayer } from './engine/VolunteerAnchorsLayer'
 import { RelationLinksLayer } from './engine/RelationLinksLayer'
+import { TopologyNetworkLayer } from './engine/TopologyNetworkLayer'
 import { useSphere } from '../../contexts/SphereContext'
 import FLAGS from '../../utils/featureFlags'
 
@@ -98,6 +99,13 @@ export default function SphereRenderer({
       engine.addLayer('relationLinks', relationLinks)
     }
 
+    // Road network topology overlay — feature-flagged
+    let topology = null
+    if (FLAGS.TOPOLOGY_NETWORK) {
+      topology = new TopologyNetworkLayer(positions)
+      engine.addLayer('topology', topology)
+    }
+
     // Store ref for imperative access from other components
     engineRef.current = {
       engine,
@@ -110,6 +118,7 @@ export default function SphereRenderer({
       neighborProj,
       volunteerAnchors,
       relationLinks,
+      topology,
     }
     if (typeof window !== 'undefined') {
       window.__SPHERE_DEBUG__ = engineRef.current

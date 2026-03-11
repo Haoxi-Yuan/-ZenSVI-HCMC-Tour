@@ -17,6 +17,7 @@ const FLAGS = {
   GPU_BLOOM_PETALS: true,     // Phase 4: InstancedMesh + vertex shader bloom animation
   SHAP_BEESWARM: true,        // Phase 2-5: SHAP beeswarm scatter plot (all 178K points)
   RELATION_LINKS: true,       // In-sphere subtle neural links between similar points
+  TOPOLOGY_NETWORK: true,     // Road network topology overlay on sphere surface
 }
 
 // Expose for runtime debugging
